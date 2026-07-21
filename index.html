@@ -105,26 +105,19 @@
       <div class="ctrl-note">Key setting for R6 at 65 brightness — pulls the lifted, greyish blacks back down so the clip has real contrast.</div>
     </div>
 
-    <h2 class="panel-title" style="margin-top:22px">Export</h2>
+    <h2 class="panel-title" style="margin-top:22px">Output quality</h2>
 
-    <div class="field-row">
-      <label>Resolution</label>
-      <select id="resSelect">
-        <option value="1920" selected>1080p — best for TikTok</option>
-        <option value="2560">1440p (2K)</option>
-        <option value="3840">4K (2160p) — heavier</option>
-        <option value="0">Keep original size</option>
-      </select>
-    </div>
     <div class="field-row">
       <label>Quality</label>
       <select id="qualitySelect">
-        <option value="10">TikTok 60fps · ~10 Mbps</option>
-        <option value="16" selected>TikTok HD · ~16 Mbps</option>
-        <option value="24">Master · ~24 Mbps</option>
-        <option value="40">Max · ~40 Mbps (overkill for TikTok)</option>
+        <option value="1920|12">HD · 1080p — smaller file</option>
+        <option value="1920|16" selected>Full HD · 1080p — best for TikTok</option>
+        <option value="2560|24">Ultra HD · 2K (1440p)</option>
+        <option value="3840|40">Ultra HD · 4K (2160p) — heaviest</option>
+        <option value="0|20">Match source size</option>
       </select>
     </div>
+    <div class="ctrl-note" id="qualityNote"></div>
 
     <button class="btn btn-primary btn-launch" id="exportBtn" disabled>⬇ Export enhanced clip</button>
     <div class="export-status" id="exportStatus"></div>
@@ -140,6 +133,6 @@
 <!-- ─────────────  TIKTOK TAB  ───────────── -->
 <main class="info-layout tab-panel" id="tab-tiktok" hidden></main>
 
-<script src="enhance.js?v=2"></script>
+<script src="enhance.js?v=3"></script>
 </body>
 </html>

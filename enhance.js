@@ -199,9 +199,16 @@ function loop() {
 }
 requestAnimationFrame(loop);
 
-/* ─────────────  Output sizing  ───────────── */
+/* ─────────────  Output quality  ─────────────
+ * One picker sets both the target resolution and the bitrate. The value is
+ * "<longEdgePx>|<mbps>"; 0 px means "keep the source resolution". */
+function getQuality() {
+  const [res, mbps] = document.getElementById('qualitySelect').value.split('|');
+  return { res: parseInt(res, 10), mbps: parseInt(mbps, 10) };
+}
+
 function computeOutSize() {
-  const target = parseInt(document.getElementById('resSelect').value, 10);
+  const target = getQuality().res;
   const vw = video.videoWidth, vh = video.videoHeight;
   if (!target) { outW = vw; outH = vh; }        // keep original
   else {
@@ -213,6 +220,23 @@ function computeOutSize() {
   canvas.width = outW;
   canvas.height = outH;
   updateMeta();
+  updateQualityNote();
+}
+
+// Honest, Wink-style explainer under the picker: upscaling past the source
+// doesn't invent detail, the sharpening/grade is what makes it look cleaner.
+function updateQualityNote() {
+  const note = document.getElementById('qualityNote');
+  if (!note) return;
+  const { res, mbps } = getQuality();
+  const vw = video.videoWidth || 0, vh = video.videoHeight || 0;
+  const long = Math.max(vw, vh);
+  let msg = `Exports ${outW || '—'}×${outH || '—'} at ~${mbps} Mbps, 60fps.`;
+  if (res && long && res > long)
+    msg += ` Upscaling from ${long}p — the sharpen + grade do the visible work; it won't add real detail past the source.`;
+  else if (res && long && res < long)
+    msg += ` Downscaling from ${long}p — sharper and smaller, ideal for TikTok.`;
+  note.textContent = msg;
 }
 
 function updateMeta() {
@@ -254,8 +278,9 @@ fileInput.addEventListener('change', () => loadFile(fileInput.files[0]));
   dropZone.addEventListener(ev, (e) => { e.preventDefault(); dropZone.classList.remove('dragover'); }));
 dropZone.addEventListener('drop', (e) => loadFile(e.dataTransfer.files[0]));
 
-document.getElementById('resSelect').addEventListener('change', () => {
+document.getElementById('qualitySelect').addEventListener('change', () => {
   if (haveFrame) { computeOutSize(); render(); }
+  else updateQualityNote();
 });
 
 /* ─────────────  Transport  ───────────── */
@@ -391,6 +416,7 @@ function markPresetCustom() {
   document.querySelectorAll('.preset').forEach(p => p.classList.remove('active'));
 }
 syncUI();
+updateQualityNote();
 
 /* ─────────────  Export  ───────────── */
 const exportBtn = document.getElementById('exportBtn');
@@ -452,7 +478,7 @@ exportBtn.addEventListener('click', async () => {
   compare = false; compareChk.checked = false;
   const wasMuted = video.muted;
 
-  const mbps = parseInt(document.getElementById('qualitySelect').value, 10);
+  const mbps = getQuality().mbps;
   const fps = 60;
 
   // Build the output stream: processed canvas video + original audio.
