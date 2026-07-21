@@ -1,0 +1,145 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>losinn qual</title>
+<link rel="stylesheet" href="style.css?v=6">
+<link rel="stylesheet" href="enhance.css?v=2">
+</head>
+<body>
+
+<header class="topbar">
+  <div class="brand"><span class="brand-mark">◎</span> losinn qual</div>
+  <div class="brand-sub">GPU sharpen · upscale · grade · trim · export — tuned for Siege @ 65 brightness</div>
+</header>
+
+<div class="tabbar" id="tabbar">
+  <button class="tab active" data-tab="enhance">Enhance</button>
+  <button class="tab" data-tab="capcut">CapCut Settings</button>
+  <button class="tab" data-tab="tiktok">TikTok Tips</button>
+</div>
+
+<!-- ─────────────  ENHANCE TAB  ───────────── -->
+<main class="enh-layout tab-panel" id="tab-enhance">
+
+  <section class="panel enh-stage">
+    <div class="drop-zone" id="dropZone">
+      <input type="file" id="fileInput" accept="video/*" hidden>
+      <div class="drop-inner">
+        <div class="drop-icon">⬆</div>
+        <div class="drop-title">Drop your clip here</div>
+        <div class="drop-sub">or click to choose · mp4 / mov / webm · stays 100% on your PC</div>
+      </div>
+    </div>
+
+    <div class="preview-wrap" id="previewWrap" hidden>
+      <canvas id="glcanvas"></canvas>
+      <video id="srcVideo" playsinline crossorigin="anonymous"></video>
+
+      <div class="transport">
+        <button class="btn btn-secondary" id="playBtn">▶ Play</button>
+        <input type="range" id="scrub" min="0" max="1000" value="0" class="scrub">
+        <span class="tcode" id="tcode">0:00 / 0:00</span>
+        <label class="compare-toggle">
+          <input type="checkbox" id="compareChk"> Before / after
+        </label>
+      </div>
+
+      <div class="trim-bar">
+        <span class="trim-label">Trim</span>
+        <button class="btn btn-secondary" id="setInBtn">⟤ Set start</button>
+        <button class="btn btn-secondary" id="setOutBtn">Set end ⟥</button>
+        <span class="trim-range" id="trimRange">full clip</span>
+        <button class="btn btn-secondary" id="trimResetBtn" hidden>Reset</button>
+      </div>
+
+      <div class="stage-meta" id="stageMeta"></div>
+    </div>
+  </section>
+
+  <section class="panel enh-controls">
+    <h2 class="panel-title">Enhance</h2>
+
+    <div class="preset-row" id="presetRow"></div>
+
+    <div class="ctrl" data-min="0" data-max="1" data-step="0.01">
+      <div class="ctrl-head"><span>Sharpness</span><span class="ctrl-val" id="v-sharp"></span></div>
+      <input type="range" id="s-sharp" min="0" max="1" step="0.01">
+      <div class="ctrl-note">Crispens edges (CAS — no halos). This is the R6 "clarity" look.</div>
+    </div>
+
+    <div class="ctrl">
+      <div class="ctrl-head"><span>Denoise / smooth</span><span class="ctrl-val" id="v-denoise"></span></div>
+      <input type="range" id="s-denoise" min="0" max="1" step="0.01">
+      <div class="ctrl-note">Cleans up dark-scene grain from Xbox compression. Keep low or it softens.</div>
+    </div>
+
+    <div class="ctrl">
+      <div class="ctrl-head"><span>Saturation</span><span class="ctrl-val" id="v-sat"></span></div>
+      <input type="range" id="s-sat" min="0" max="2" step="0.01">
+      <div class="ctrl-note">Colour intensity.</div>
+    </div>
+
+    <div class="ctrl">
+      <div class="ctrl-head"><span>Vibrance</span><span class="ctrl-val" id="v-vib"></span></div>
+      <input type="range" id="s-vib" min="0" max="1" step="0.01">
+      <div class="ctrl-note">Boosts dull colours without blowing out skin/UI. Better than raw saturation.</div>
+    </div>
+
+    <div class="ctrl">
+      <div class="ctrl-head"><span>Contrast</span><span class="ctrl-val" id="v-contrast"></span></div>
+      <input type="range" id="s-contrast" min="0.5" max="1.6" step="0.01">
+      <div class="ctrl-note">Punch. Helps recover depth lost at 65 in-game brightness.</div>
+    </div>
+
+    <div class="ctrl">
+      <div class="ctrl-head"><span>Brightness</span><span class="ctrl-val" id="v-bright"></span></div>
+      <input type="range" id="s-bright" min="-0.25" max="0.25" step="0.01">
+      <div class="ctrl-note">Overall exposure. Nudge down slightly if 65 brightness looks washed out.</div>
+    </div>
+
+    <div class="ctrl">
+      <div class="ctrl-head"><span>Deepen blacks</span><span class="ctrl-val" id="v-black"></span></div>
+      <input type="range" id="s-black" min="0" max="0.2" step="0.005">
+      <div class="ctrl-note">Key setting for R6 at 65 brightness — pulls the lifted, greyish blacks back down so the clip has real contrast.</div>
+    </div>
+
+    <h2 class="panel-title" style="margin-top:22px">Export</h2>
+
+    <div class="field-row">
+      <label>Resolution</label>
+      <select id="resSelect">
+        <option value="1920" selected>1080p — best for TikTok</option>
+        <option value="2560">1440p (2K)</option>
+        <option value="3840">4K (2160p) — heavier</option>
+        <option value="0">Keep original size</option>
+      </select>
+    </div>
+    <div class="field-row">
+      <label>Quality</label>
+      <select id="qualitySelect">
+        <option value="10">TikTok 60fps · ~10 Mbps</option>
+        <option value="16" selected>TikTok HD · ~16 Mbps</option>
+        <option value="24">Master · ~24 Mbps</option>
+        <option value="40">Max · ~40 Mbps (overkill for TikTok)</option>
+      </select>
+    </div>
+
+    <button class="btn btn-primary btn-launch" id="exportBtn" disabled>⬇ Export enhanced clip</button>
+    <div class="export-status" id="exportStatus"></div>
+    <p class="notes" id="fmtNote"></p>
+    <p class="notes" id="mobileNote" hidden></p>
+  </section>
+
+</main>
+
+<!-- ─────────────  CAPCUT TAB  ───────────── -->
+<main class="info-layout tab-panel" id="tab-capcut" hidden></main>
+
+<!-- ─────────────  TIKTOK TAB  ───────────── -->
+<main class="info-layout tab-panel" id="tab-tiktok" hidden></main>
+
+<script src="enhance.js?v=2"></script>
+</body>
+</html>
