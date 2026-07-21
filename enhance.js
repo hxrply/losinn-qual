@@ -428,26 +428,32 @@ function setStatus(msg, cls) {
 }
 
 function pickMime() {
+  // Prefer H.264 + AAC MP4 (what TikTok decodes most reliably). Full a/v codec
+  // strings first so the browser muxes a standard file, then looser fallbacks.
   const list = [
+    'video/mp4;codecs=avc1.42E01E,mp4a.40.2',
     'video/mp4;codecs=avc1.42E01E',
+    'video/mp4;codecs=h264,aac',
     'video/mp4',
-    'video/webm;codecs=vp9',
-    'video/webm;codecs=vp8',
+    'video/webm;codecs=vp9,opus',
+    'video/webm;codecs=vp8,opus',
     'video/webm',
   ];
   for (const m of list) if (MediaRecorder.isTypeSupported(m)) return m;
   return '';
 }
 
-// Report the export format up front so nobody's surprised by a .webm.
+// Report the export format up front so nobody's surprised by a .webm, and warn
+// about the main TikTok "couldn't decode" cause (webm / iOS recorder).
 (function noteFormat() {
   const mime = pickMime();
   const note = document.getElementById('fmtNote');
-  if (!mime) { note.textContent = 'Recording not supported in this browser — try Chrome or Edge.'; return; }
+  if (!mime) { note.textContent = 'Recording isn\'t supported in this browser — use Chrome or Edge.'; return; }
   if (mime.startsWith('video/mp4'))
-    note.textContent = 'Exports as .mp4 (H.264) — uploads straight to TikTok.';
+    note.innerHTML = 'Exports <b>.mp4 (H.264)</b> — TikTok reads this directly.';
   else
-    note.textContent = 'This browser records .webm. TikTok accepts it, but for best results use Chrome/Edge (which give .mp4), or convert the .webm in CapCut.';
+    note.innerHTML = 'This browser records <b>.webm</b>, which is what TikTok often <b>can\'t decode</b>. ' +
+      'For a TikTok-ready .mp4, export in <b>Chrome or Edge on a computer</b> (or re-save the .webm through CapCut).';
 })();
 
 // Phone support: works on Android Chrome and modern iOS Safari. Pick a clip
@@ -479,7 +485,11 @@ exportBtn.addEventListener('click', async () => {
   const wasMuted = video.muted;
 
   const mbps = getQuality().mbps;
-  const fps = 60;
+  const fps = 60;   // keep 60 for smooth gameplay
+
+  // Draw a fresh frame first so the stream starts on real content, not a blank
+  // or stale canvas (a blank first frame can corrupt the file's start).
+  render();
 
   // Build the output stream: processed canvas video + original audio.
   const stream = canvas.captureStream(fps);
@@ -545,7 +555,7 @@ exportBtn.addEventListener('click', async () => {
   await new Promise(r => { video.onseeked = r; });
   video.onseeked = null;
 
-  rec.start();
+  rec.start(250);   // flush data every 250ms so the file finalises cleanly
   try { await video.play(); }
   catch (err) { setStatus('Playback blocked: ' + err.message, 'err'); finish(); }
   playBtn.textContent = '❚❚ Recording…';
@@ -603,6 +613,16 @@ document.getElementById('tab-capcut').innerHTML = `
   </div>`;
 
 document.getElementById('tab-tiktok').innerHTML = `
+  <div class="info-card">
+    <h3>⚠ TikTok says "couldn't decode / unsupported"?</h3>
+    <div class="sub">Almost always the file format — here's how to get one TikTok accepts.</div>
+    <ul class="tip-list">
+      <li><b>Check the file is .mp4, not .webm.</b> TikTok frequently rejects .webm. This app exports .mp4 in <b>Chrome or Edge</b>; some browsers (older or in-app ones) fall back to .webm — the note under the Export button tells you which you'll get.</li>
+      <li><b>iPhone is the usual culprit.</b> iOS Safari's recorder can make files TikTok won't read. Do the <b>Export</b> step in <b>Chrome on Android</b> or <b>Chrome/Edge on a computer</b> — you can still enhance/preview on iPhone, just export elsewhere.</li>
+      <li><b>If you already have a .webm,</b> drop it into CapCut and export it as MP4 (H.264) — that re-wraps it into something TikTok reads.</li>
+      <li><b>Still failing?</b> Try the <b>HD · 1080p</b> quality option (not 4K) — huge files from a phone can finish half-written and won't decode.</li>
+    </ul>
+  </div>
   <div class="info-card">
     <h3>Get the most views + best quality on TikTok</h3>
     <div class="sub">TikTok compresses hard. These settings and habits fight that and help the algorithm.</div>
