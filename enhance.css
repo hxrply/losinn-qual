@@ -212,6 +212,37 @@
 }
 .callout b { color: var(--accent-2); }
 
+/* ── Analyse tab: metric readout ── */
+.an-summary {
+  font-family: var(--mono); font-size: 13px; line-height: 1.6;
+  color: var(--text); margin: 16px 0 20px;
+  padding: 12px 15px; border-radius: 10px;
+  background: color-mix(in srgb, var(--accent) 10%, var(--panel-2));
+  border: 1px solid color-mix(in srgb, var(--accent) 30%, var(--border));
+}
+.an-summary b { color: var(--accent-2); }
+.metric { margin-bottom: 16px; }
+.metric-head {
+  display: flex; justify-content: space-between; align-items: baseline;
+  font-family: var(--mono); font-size: 13px; margin-bottom: 6px;
+}
+.metric-head .mval { font-weight: 700; color: var(--accent-2); font-size: 14px; }
+.metric-bar {
+  position: relative; height: 9px; border-radius: 5px;
+  background: var(--panel-2); border: 1px solid var(--border); overflow: hidden;
+}
+.metric-fill {
+  position: absolute; top: 0; left: 0; height: 100%;
+  background: linear-gradient(90deg, var(--accent), var(--accent-2));
+  border-radius: 5px; transition: width 0.4s ease;
+}
+/* Centre-origin bar (for warmth: cool ← → warm) */
+.metric-bar.center .metric-fill {
+  background: var(--accent-2);
+  left: 50%; width: 0; transform-origin: left;
+}
+.metric-desc { font-family: var(--mono); font-size: 11px; color: var(--dim); margin-top: 5px; }
+
 /* ── Touch-friendly sliders (all screens) ──
  * Native thumbs are tiny on phones; give every slider a big, obvious grab
  * handle so fine adjustments are actually possible with a finger. */

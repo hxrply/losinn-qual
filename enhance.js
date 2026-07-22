@@ -643,3 +643,144 @@ document.getElementById('tab-tiktok').innerHTML = `
       sharp, high-bitrate, correctly-sized master (HD upload ON) means what survives compression looks far better than a soft, dark, low-bitrate clip.
     </div>
   </div>`;
+
+/* ─────────────  Analyse tab  ─────────────
+ * Samples several frames of a dropped clip and measures its current look:
+ * brightness, contrast, saturation, warmth and sharpness. It reports what the
+ * video looks like now — it cannot recover the exact CapCut slider values used,
+ * because a finished, re-encoded video no longer stores that edit history. */
+(function () {
+  const drop = document.getElementById('anDrop');
+  const fileIn = document.getElementById('anFile');
+  const busy = document.getElementById('anBusy');
+  const results = document.getElementById('anResults');
+  const cvs = document.getElementById('anCanvas');
+  const anVideo = document.createElement('video');
+  anVideo.muted = true; anVideo.playsInline = true; anVideo.preload = 'auto';
+
+  drop.addEventListener('click', () => fileIn.click());
+  fileIn.addEventListener('change', () => { if (fileIn.files[0]) run(fileIn.files[0]); });
+  ['dragenter', 'dragover'].forEach(ev =>
+    drop.addEventListener(ev, e => { e.preventDefault(); drop.classList.add('dragover'); }));
+  ['dragleave', 'drop'].forEach(ev =>
+    drop.addEventListener(ev, e => { e.preventDefault(); drop.classList.remove('dragover'); }));
+  drop.addEventListener('drop', e => { if (e.dataTransfer.files[0]) run(e.dataTransfer.files[0]); });
+  document.getElementById('anAgain').addEventListener('click', () => {
+    results.hidden = true; drop.hidden = false;
+  });
+
+  const seek = (t) => new Promise(res => {
+    const on = () => { anVideo.removeEventListener('seeked', on); res(); };
+    anVideo.addEventListener('seeked', on);
+    try { anVideo.currentTime = t; } catch (_) { res(); }
+  });
+
+  async function run(file) {
+    if (!file.type.startsWith('video/')) { showBusy('Please choose a video file.'); return; }
+    drop.hidden = true; results.hidden = true;
+    showBusy('Loading clip…');
+    anVideo.src = URL.createObjectURL(file);
+    try {
+      await new Promise((res, rej) => { anVideo.onloadeddata = res; anVideo.onerror = () => rej(); });
+    } catch (_) { fail('Could not read that video file.'); return; }
+    if (!anVideo.videoWidth) { fail('Could not read that video file.'); return; }
+
+    const W = 320, H = Math.max(1, Math.round(320 * anVideo.videoHeight / anVideo.videoWidth));
+    cvs.width = W; cvs.height = H;
+    const ctx = cvs.getContext('2d', { willReadFrequently: true });
+    const dur = (anVideo.duration && isFinite(anVideo.duration)) ? anVideo.duration : 0;
+    const N = 8;
+    let count = 0, sumL = 0, sumL2 = 0, sumS = 0, sumR = 0, sumB = 0, sumEdge = 0, frames = 0;
+
+    for (let i = 0; i < N; i++) {
+      showBusy(`Analysing… ${Math.round(i / N * 100)}%`);
+      const t = dur ? Math.min(dur * (i + 0.5) / N, Math.max(0, dur - 0.05)) : 0;
+      await seek(t);
+      try { ctx.drawImage(anVideo, 0, 0, W, H); } catch (_) {}
+      let img;
+      try { img = ctx.getImageData(0, 0, W, H).data; }
+      catch (_) { fail('The browser blocked reading this video\'s frames.'); return; }
+
+      const luma = new Float32Array(W * H);
+      for (let p = 0, q = 0; p < img.length; p += 4, q++) {
+        const r = img[p], g = img[p + 1], b = img[p + 2];
+        const l = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+        luma[q] = l;
+        sumL += l; sumL2 += l * l;
+        const mx = Math.max(r, g, b), mn = Math.min(r, g, b);
+        sumS += mx > 0 ? (mx - mn) / mx : 0;
+        sumR += r; sumB += b; count++;
+      }
+      let e = 0, ec = 0;
+      for (let y = 0; y < H - 1; y++) for (let x = 0; x < W - 1; x++) {
+        const idx = y * W + x;
+        e += Math.abs(luma[idx] - luma[idx + 1]) + Math.abs(luma[idx] - luma[idx + W]);
+        ec++;
+      }
+      if (ec) sumEdge += e / ec;
+      frames++;
+      if (!dur) break;
+    }
+
+    if (!count) { fail('Could not analyse that clip.'); return; }
+    const meanL = sumL / count;
+    const stdL = Math.sqrt(Math.max(0, sumL2 / count - meanL * meanL));
+    const meanS = sumS / count;
+    const warm = (sumR - sumB) / count;
+    const edge = frames ? sumEdge / frames : 0;
+    renderMetrics({ meanL, stdL, meanS, warm, edge });
+    busy.hidden = true; results.hidden = false;
+  }
+
+  function showBusy(msg) { busy.hidden = false; busy.textContent = msg; }
+  function fail(msg) { busy.hidden = false; busy.textContent = msg; drop.hidden = false; }
+
+  // first threshold strictly greater than v wins
+  function pick(v, table) { for (const [th, word] of table) if (v < th) return word; return table[table.length - 1][1]; }
+
+  function renderMetrics(m) {
+    const B = m.meanL / 255 * 100;
+    const C = Math.min(100, m.stdL / 70 * 100);
+    const S = Math.min(100, m.meanS * 100);
+    const Sh = Math.min(100, m.edge / 18 * 100);
+    const warmPct = Math.max(-100, Math.min(100, m.warm / 40 * 100));
+
+    const bW = pick(B, [[30, 'Dark'], [42, 'Dim'], [58, 'Balanced'], [72, 'Bright'], [101, 'Very bright']]);
+    const cW = pick(C, [[30, 'Flat'], [45, 'Medium'], [64, 'Punchy'], [101, 'Very punchy']]);
+    const sW = pick(S, [[18, 'Muted'], [30, 'Natural'], [45, 'Vivid'], [101, 'Very saturated']]);
+    const shW = pick(Sh, [[25, 'Soft'], [45, 'Natural'], [65, 'Sharpened'], [101, 'Heavily sharpened']]);
+    const wW = m.warm < -6 ? 'Cool' : m.warm > 6 ? 'Warm' : 'Neutral';
+    const warmLabel = wW === 'Neutral' ? 'Neutral' : `${wW} (${m.warm >= 0 ? '+' : '−'}${Math.abs(Math.round(m.warm))})`;
+
+    document.getElementById('anSummary').innerHTML =
+      `Overall this clip looks <b>${bW.toLowerCase()}</b>, <b>${cW.toLowerCase()}</b> contrast, ` +
+      `<b>${sW.toLowerCase()}</b> colour, <b>${shW.toLowerCase()}</b>, and colour-wise <b>${wW.toLowerCase()}</b>. ` +
+      `To recreate it on your own clip, open <b>Enhance</b> and push the sliders toward these readings.`;
+
+    const warmHalf = Math.abs(warmPct) / 2;
+    const warmLeft = m.warm >= 0 ? 50 : 50 - warmHalf;
+
+    document.getElementById('anMetrics').innerHTML = [
+      bar('Brightness', Math.round(B) + ' / 100', B, `${bW} — average lightness of the picture.`),
+      bar('Contrast', Math.round(C) + ' / 100', C, `${cW} — gap between the darkest and brightest parts.`),
+      bar('Saturation', Math.round(S) + ' / 100', S, `${sW} — how strong the colours are.`),
+      bar('Sharpness', Math.round(Sh) + ' / 100', Sh, `${shW} — amount of fine edge detail.`),
+      centreBar('Warmth', warmLabel, warmLeft, warmHalf, 'Cool (blue) ← → warm (orange).'),
+    ].join('');
+  }
+
+  function bar(name, val, pct, desc) {
+    return `<div class="metric">
+      <div class="metric-head"><span>${name}</span><span class="mval">${val}</span></div>
+      <div class="metric-bar"><div class="metric-fill" style="width:${pct}%"></div></div>
+      <div class="metric-desc">${desc}</div>
+    </div>`;
+  }
+  function centreBar(name, val, left, width, desc) {
+    return `<div class="metric">
+      <div class="metric-head"><span>${name}</span><span class="mval">${val}</span></div>
+      <div class="metric-bar center"><div class="metric-fill" style="left:${left}%;width:${width}%"></div></div>
+      <div class="metric-desc">${desc}</div>
+    </div>`;
+  }
+})();

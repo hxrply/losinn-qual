@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>losinn qual</title>
 <link rel="stylesheet" href="style.css?v=6">
-<link rel="stylesheet" href="enhance.css?v=3">
+<link rel="stylesheet" href="enhance.css?v=4">
 </head>
 <body>
 
@@ -16,6 +16,7 @@
 
 <div class="tabbar" id="tabbar">
   <button class="tab active" data-tab="enhance">Enhance</button>
+  <button class="tab" data-tab="analyse">Analyse</button>
   <button class="tab" data-tab="capcut">CapCut Settings</button>
   <button class="tab" data-tab="tiktok">TikTok Tips</button>
 </div>
@@ -127,12 +128,45 @@
 
 </main>
 
+<!-- ─────────────  ANALYSE TAB  ───────────── -->
+<main class="info-layout tab-panel" id="tab-analyse" hidden>
+  <div class="info-card">
+    <h3>Analyse a clip's look</h3>
+    <div class="sub">Drop a clip to read its brightness, contrast, saturation, warmth and sharpness.</div>
+
+    <div class="drop-zone" id="anDrop">
+      <input type="file" id="anFile" accept="video/*" hidden>
+      <div class="drop-inner">
+        <div class="drop-icon">🔍</div>
+        <div class="drop-title">Drop a clip to analyse</div>
+        <div class="drop-sub">tap to choose · stays 100% on your device</div>
+      </div>
+    </div>
+
+    <div id="anBusy" class="export-status busy" hidden></div>
+    <canvas id="anCanvas" hidden></canvas>
+
+    <div id="anResults" hidden>
+      <div class="an-summary" id="anSummary"></div>
+      <div id="anMetrics"></div>
+      <button class="btn btn-secondary" id="anAgain" style="margin-top:14px">Analyse another clip</button>
+    </div>
+
+    <div class="callout" style="margin-top:16px">
+      <b>What this is:</b> it measures the clip's <i>current</i> look — its real brightness, contrast, saturation,
+      warmth and sharpness. It <b>can't</b> read the exact CapCut slider numbers someone used (a finished video
+      doesn't store those), but these readings tell you the look so you can recreate it on your own clip in the
+      <b>Enhance</b> tab.
+    </div>
+  </div>
+</main>
+
 <!-- ─────────────  CAPCUT TAB  ───────────── -->
 <main class="info-layout tab-panel" id="tab-capcut" hidden></main>
 
 <!-- ─────────────  TIKTOK TAB  ───────────── -->
 <main class="info-layout tab-panel" id="tab-tiktok" hidden></main>
 
-<script src="enhance.js?v=4"></script>
+<script src="enhance.js?v=5"></script>
 </body>
 </html>
