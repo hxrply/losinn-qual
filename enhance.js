@@ -47,11 +47,13 @@ uniform float uBright;    // -0.25..0.25
 uniform float uBlack;     // 0..0.2  (black-point lift removal)
 uniform float uCompare;   // 0/1
 uniform float uSplit;     // 0..1
+uniform vec2  uUvScale;   // crop/reframe: source UV span shown
+uniform vec2  uUvOffset;  // crop/reframe: source UV origin
 
 vec3 tap(vec2 uv) { return texture2D(uTex, uv).rgb; }
 
 void main() {
-  vec2 uv = vUv;
+  vec2 uv = vUv * uUvScale + uUvOffset;   // apply crop / 9:16 reframe
   vec3 orig = tap(uv);
 
   // ── light denoise (3x3 mean, blended) ──
@@ -109,8 +111,8 @@ void main() {
 
   // ── before/after split ──
   if (uCompare > 0.5) {
-    if (uv.x < uSplit) col = orig;
-    if (abs(uv.x - uSplit) < 0.0015) col = vec3(0.73, 0.55, 1.0);
+    if (vUv.x < uSplit) col = orig;
+    if (abs(vUv.x - uSplit) < 0.0015) col = vec3(0.73, 0.55, 1.0);
   }
 
   gl_FragColor = vec4(col, 1.0);
@@ -147,7 +149,7 @@ gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
 gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
 
 const U = {};
-['uTexel', 'uSharp', 'uDenoise', 'uSat', 'uVib', 'uContrast', 'uBright', 'uBlack', 'uCompare', 'uSplit']
+['uTexel', 'uSharp', 'uDenoise', 'uSat', 'uVib', 'uContrast', 'uBright', 'uBlack', 'uCompare', 'uSplit', 'uUvScale', 'uUvOffset']
   .forEach(n => U[n] = gl.getUniformLocation(prog, n));
 
 /* ─────────────  State  ───────────── */
@@ -159,6 +161,9 @@ const params = {
   sharp: 0.55, denoise: 0.12, sat: 1.14, vib: 0.30, contrast: 1.12, bright: -0.02, black: 0.05,
 };
 let compare = false, splitX = 0.5;
+let aspect = 'source';        // 'source' | '9x16'
+let reframe = 0;              // -0.5..0.5 pan within the crop
+const crop = { sx: 1, sy: 1, ox: 0, oy: 0 };   // source UV transform
 
 // Tuned for R6 Siege on 65 in-game brightness: that setting lifts the black
 // floor (flat / greyish look), so the defaults add contrast + deepen blacks
@@ -171,6 +176,38 @@ const PRESETS = {
   'Max sharp':      { sharp: 0.92, denoise: 0.05, sat: 1.16, vib: 0.32, contrast: 1.12, bright: -0.02, black: 0.05 },
   'None':           { sharp: 0.00, denoise: 0.00, sat: 1.00, vib: 0.00, contrast: 1.00, bright: 0.00,  black: 0.00 },
 };
+
+/* Remember the user's settings between visits. */
+const LS_KEY = 'losinnqual.settings.v1';
+function saveSettings() {
+  try {
+    localStorage.setItem(LS_KEY, JSON.stringify({
+      params,
+      quality: document.getElementById('qualitySelect').value,
+      aspect, reframe,
+      mute: document.getElementById('muteChk').checked,
+    }));
+  } catch (_) { /* private mode / storage disabled — just don't persist */ }
+}
+function loadSettings() {
+  let s;
+  try { s = JSON.parse(localStorage.getItem(LS_KEY) || 'null'); } catch (_) { return; }
+  if (!s) return;
+  if (s.params) Object.assign(params, s.params);
+  const q = document.getElementById('qualitySelect');
+  if (s.quality && [...q.options].some(o => o.value === s.quality)) q.value = s.quality;
+  if (s.aspect) {
+    aspect = s.aspect;
+    document.getElementById('aspectSelect').value = aspect;
+    document.getElementById('reframeCtrl').hidden = aspect === 'source';
+  }
+  if (typeof s.reframe === 'number') {
+    reframe = s.reframe;
+    document.getElementById('s-reframe').value = reframe;
+    document.getElementById('v-reframe').textContent = reframe.toFixed(2);
+  }
+  if (s.mute) document.getElementById('muteChk').checked = true;
+}
 
 /* ─────────────  Rendering  ───────────── */
 function render() {
@@ -188,6 +225,8 @@ function render() {
   gl.uniform1f(U.uBlack, params.black);
   gl.uniform1f(U.uCompare, compare ? 1 : 0);
   gl.uniform1f(U.uSplit, splitX);
+  gl.uniform2f(U.uUvScale, crop.sx, crop.sy);
+  gl.uniform2f(U.uUvOffset, crop.ox, crop.oy);
 
   gl.viewport(0, 0, canvas.width, canvas.height);
   gl.drawArrays(gl.TRIANGLES, 0, 3);
@@ -210,17 +249,41 @@ function getQuality() {
 function computeOutSize() {
   const target = getQuality().res;
   const vw = video.videoWidth, vh = video.videoHeight;
-  if (!target) { outW = vw; outH = vh; }        // keep original
-  else {
-    const long = Math.max(vw, vh);
-    const scale = target / long;
-    outW = Math.round(vw * scale / 2) * 2;      // keep even
-    outH = Math.round(vh * scale / 2) * 2;
-  }
+  const srcA = vw / vh;
+
+  // Output aspect: keep the source, or force TikTok's 9:16.
+  const outA = aspect === '9x16' ? (9 / 16) : srcA;
+
+  // Output pixels: long edge = chosen resolution (or source long edge).
+  const long = target || Math.max(vw, vh);
+  if (outA >= 1) { outW = long; outH = Math.round(long / outA); }
+  else           { outH = long; outW = Math.round(long * outA); }
+  outW = Math.round(outW / 2) * 2;               // keep even (encoder-friendly)
+  outH = Math.round(outH / 2) * 2;
   canvas.width = outW;
   canvas.height = outH;
+
+  computeCrop(srcA, outA);
   updateMeta();
   updateQualityNote();
+}
+
+// Fill the output aspect from the source (crop the overflowing axis), honouring
+// the reframe pan. When aspects match this is a no-op (whole frame shown).
+function computeCrop(srcA, outA) {
+  if (srcA > outA) {          // source wider than target → crop width
+    crop.sx = outA / srcA; crop.sy = 1;
+    const room = 1 - crop.sx;
+    crop.ox = room * (0.5 + reframe); crop.oy = 0;
+    crop.ox = Math.max(0, Math.min(room, crop.ox));
+  } else if (srcA < outA) {   // source taller than target → crop height
+    crop.sy = srcA / outA; crop.sx = 1;
+    const room = 1 - crop.sy;
+    crop.oy = room * (0.5 + reframe); crop.ox = 0;
+    crop.oy = Math.max(0, Math.min(room, crop.oy));
+  } else {
+    crop.sx = 1; crop.sy = 1; crop.ox = 0; crop.oy = 0;
+  }
 }
 
 // Honest, Wink-style explainer under the picker: upscaling past the source
@@ -279,9 +342,30 @@ fileInput.addEventListener('change', () => loadFile(fileInput.files[0]));
 dropZone.addEventListener('drop', (e) => loadFile(e.dataTransfer.files[0]));
 
 document.getElementById('qualitySelect').addEventListener('change', () => {
+  saveSettings();
   if (haveFrame) { computeOutSize(); render(); }
   else updateQualityNote();
 });
+
+/* ─────────────  Framing (aspect + reframe)  ───────────── */
+const aspectSelect = document.getElementById('aspectSelect');
+const reframeCtrl = document.getElementById('reframeCtrl');
+aspectSelect.addEventListener('change', () => {
+  aspect = aspectSelect.value;
+  reframeCtrl.hidden = aspect === 'source';
+  saveSettings();
+  if (haveFrame) { computeOutSize(); render(); }
+});
+document.getElementById('s-reframe').addEventListener('input', (e) => {
+  reframe = parseFloat(e.target.value);
+  document.getElementById('v-reframe').textContent = reframe.toFixed(2);
+  if (haveFrame) {
+    computeCrop(video.videoWidth / video.videoHeight, aspect === '9x16' ? 9 / 16 : video.videoWidth / video.videoHeight);
+    render();
+  }
+  saveSettings();
+});
+document.getElementById('muteChk').addEventListener('change', saveSettings);
 
 /* ─────────────  Transport  ───────────── */
 const playBtn = document.getElementById('playBtn');
@@ -393,6 +477,7 @@ for (const k in SLIDERS) {
     document.getElementById(VALS[k]).textContent = fmtVal(k);
     markPresetCustom();
     render();
+    saveSettings();
   });
 }
 
@@ -409,12 +494,14 @@ Object.keys(PRESETS).forEach((name) => {
     document.querySelectorAll('.preset').forEach(p => p.classList.toggle('active', p === b));
     syncUI();
     render();
+    saveSettings();
   });
   presetRow.appendChild(b);
 });
 function markPresetCustom() {
   document.querySelectorAll('.preset').forEach(p => p.classList.remove('active'));
 }
+loadSettings();     // restore saved sliders/quality/framing before first paint
 syncUI();
 updateQualityNote();
 
@@ -492,13 +579,16 @@ exportBtn.addEventListener('click', async () => {
   render();
 
   // Build the output stream: processed canvas video + original audio.
+  const muteOut = document.getElementById('muteChk').checked;
   const stream = canvas.captureStream(fps);
-  try {
-    video.muted = false;                       // needed so audio is in the capture
-    const audio = video.captureStream ? video.captureStream()
-                : video.mozCaptureStream ? video.mozCaptureStream() : null;
-    if (audio) audio.getAudioTracks().forEach(t => stream.addTrack(t));
-  } catch (_) { /* no audio track — export silent video */ }
+  if (!muteOut) {
+    try {
+      video.muted = false;                       // needed so audio is in the capture
+      const audio = video.captureStream ? video.captureStream()
+                  : video.mozCaptureStream ? video.mozCaptureStream() : null;
+      if (audio) audio.getAudioTracks().forEach(t => stream.addTrack(t));
+    } catch (_) { /* no audio track — export silent video */ }
+  }
 
   let rec;
   try {
@@ -669,6 +759,30 @@ document.getElementById('tab-tiktok').innerHTML = `
     results.hidden = true; drop.hidden = false;
   });
 
+  let lastLook = null;
+
+  // Map an analysed look to Enhance slider starting points, then jump there.
+  // Approximate on purpose: the Enhance sliders are adjustments applied to
+  // whatever clip you load, so these push a clip toward the analysed look.
+  document.getElementById('anUse').addEventListener('click', () => {
+    if (!lastLook) return;
+    const { B, C, S, Sh } = lastLook;
+    const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+    params.sat      = +clamp(1 + (S - 30) / 70 * 0.8, 0.6, 1.9).toFixed(2);
+    params.contrast = +clamp(1 + (C - 40) / 60 * 0.5, 0.6, 1.5).toFixed(2);
+    params.sharp    = +clamp((Sh - 10) / 70, 0, 1).toFixed(2);
+    params.bright   = +clamp((B - 50) / 100 * 0.4, -0.2, 0.2).toFixed(2);
+    params.vib      = +clamp((S - 30) / 70 * 0.4, 0, 0.5).toFixed(2);
+    params.black    = +clamp((C - 40) / 60 * 0.06, 0, 0.08).toFixed(3);
+    markPresetCustom();
+    syncUI();
+    if (typeof haveFrame !== 'undefined' && haveFrame) render();
+    saveSettings();
+    document.querySelector('.tab[data-tab="enhance"]').click();
+    const es = document.getElementById('exportStatus');
+    if (es) { es.className = 'export-status'; es.textContent = 'Loaded these readings as a starting point — tweak to taste.'; }
+  });
+
   const seek = (t) => new Promise(res => {
     const on = () => { anVideo.removeEventListener('seeked', on); res(); };
     anVideo.addEventListener('seeked', on);
@@ -744,6 +858,7 @@ document.getElementById('tab-tiktok').innerHTML = `
     const S = Math.min(100, m.meanS * 100);
     const Sh = Math.min(100, m.edge / 18 * 100);
     const warmPct = Math.max(-100, Math.min(100, m.warm / 40 * 100));
+    lastLook = { B, C, S, Sh, warm: m.warm };
 
     const bW = pick(B, [[30, 'Dark'], [42, 'Dim'], [58, 'Balanced'], [72, 'Bright'], [101, 'Very bright']]);
     const cW = pick(C, [[30, 'Flat'], [45, 'Medium'], [64, 'Punchy'], [101, 'Very punchy']]);

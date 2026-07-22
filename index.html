@@ -2,10 +2,19 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <title>losinn qual</title>
+<meta name="description" content="GPU Rainbow Six Siege clip enhancer — sharpen, upscale, grade, trim and export for TikTok. Runs in your browser.">
+<meta name="theme-color" content="#060409">
+<link rel="manifest" href="manifest.json">
+<link rel="icon" href="icon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="icon.svg">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="losinn qual">
 <link rel="stylesheet" href="style.css?v=6">
-<link rel="stylesheet" href="enhance.css?v=4">
+<link rel="stylesheet" href="enhance.css?v=5">
 </head>
 <body>
 
@@ -106,6 +115,21 @@
       <div class="ctrl-note">Key setting for R6 at 65 brightness — pulls the lifted, greyish blacks back down so the clip has real contrast.</div>
     </div>
 
+    <h2 class="panel-title" style="margin-top:22px">Framing</h2>
+
+    <div class="field-row">
+      <label>Shape</label>
+      <select id="aspectSelect">
+        <option value="source" selected>Original shape</option>
+        <option value="9x16">Vertical 9:16 — fills TikTok</option>
+      </select>
+    </div>
+    <div class="ctrl" id="reframeCtrl" hidden>
+      <div class="ctrl-head"><span>Reframe</span><span class="ctrl-val" id="v-reframe">0</span></div>
+      <input type="range" id="s-reframe" min="-0.5" max="0.5" step="0.01" value="0">
+      <div class="ctrl-note">Slide to choose which part of the wide clip the vertical crop keeps (your crosshair is centred, so 0 is usually right).</div>
+    </div>
+
     <h2 class="panel-title" style="margin-top:22px">Output quality</h2>
 
     <div class="field-row">
@@ -119,6 +143,10 @@
       </select>
     </div>
     <div class="ctrl-note" id="qualityNote"></div>
+
+    <label class="compare-toggle" style="margin-top:14px">
+      <input type="checkbox" id="muteChk"> Export without sound (for adding a TikTok song)
+    </label>
 
     <button class="btn btn-primary btn-launch" id="exportBtn" disabled>⬇ Export enhanced clip</button>
     <div class="export-status" id="exportStatus"></div>
@@ -149,7 +177,10 @@
     <div id="anResults" hidden>
       <div class="an-summary" id="anSummary"></div>
       <div id="anMetrics"></div>
-      <button class="btn btn-secondary" id="anAgain" style="margin-top:14px">Analyse another clip</button>
+      <div class="an-actions">
+        <button class="btn btn-accent" id="anUse">Use as Enhance starting point →</button>
+        <button class="btn btn-secondary" id="anAgain">Analyse another clip</button>
+      </div>
     </div>
 
     <div class="callout" style="margin-top:16px">
@@ -167,6 +198,6 @@
 <!-- ─────────────  TIKTOK TAB  ───────────── -->
 <main class="info-layout tab-panel" id="tab-tiktok" hidden></main>
 
-<script src="enhance.js?v=5"></script>
+<script src="enhance.js?v=6"></script>
 </body>
 </html>

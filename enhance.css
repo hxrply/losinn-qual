@@ -86,14 +86,15 @@
 /* ── Preview ── */
 .preview-wrap { display: flex; flex-direction: column; gap: 10px; }
 #glcanvas {
-  width: 100%;
+  width: auto;
   height: auto;
-  max-height: 62vh;
-  object-fit: contain;
+  max-width: 100%;
+  max-height: 62vh;      /* fit within both — keeps tall 9:16 output on screen */
   background: #08080c;
   border-radius: 12px;
   border: 1px solid var(--border);
   display: block;
+  margin: 0 auto;
   touch-action: none;   /* let us drag the before/after split on touch */
 }
 #srcVideo { display: none; }
@@ -242,6 +243,8 @@
   left: 50%; width: 0; transform-origin: left;
 }
 .metric-desc { font-family: var(--mono); font-size: 11px; color: var(--dim); margin-top: 5px; }
+.an-actions { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 16px; }
+.an-actions .btn { flex: 1; min-width: 160px; padding: 12px 14px; }
 
 /* ── Touch-friendly sliders (all screens) ──
  * Native thumbs are tiny on phones; give every slider a big, obvious grab
