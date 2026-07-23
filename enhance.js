@@ -209,6 +209,61 @@ function loadSettings() {
   if (s.mute) document.getElementById('muteChk').checked = true;
 }
 
+/* ── Profiles: user-saved looks (separate from the built-in presets) ── */
+const PROF_KEY = 'losinnqual.profiles.v1';
+function getProfiles() { try { return JSON.parse(localStorage.getItem(PROF_KEY) || '{}'); } catch (_) { return {}; } }
+function setProfiles(p) { try { localStorage.setItem(PROF_KEY, JSON.stringify(p)); } catch (_) {} }
+function refreshProfileList(selName) {
+  const el = document.getElementById('profileSelect');
+  const names = Object.keys(getProfiles());
+  el.innerHTML = '';
+  const ph = document.createElement('option');
+  ph.value = '';
+  ph.textContent = names.length ? 'Your saved profiles…' : 'No profiles yet — save one below';
+  el.appendChild(ph);
+  names.forEach(n => { const o = document.createElement('option'); o.value = n; o.textContent = n; el.appendChild(o); });
+  if (selName) el.value = selName;
+}
+function applyParams(prms) {
+  Object.assign(params, prms);
+  markPresetCustom();
+  syncUI();
+  if (haveFrame) render();
+  saveSettings();
+}
+function saveProfileFromParams(prms) {
+  const name = (prompt('Name this profile:') || '').trim();
+  if (!name) return null;
+  const p = getProfiles(); p[name] = { ...prms }; setProfiles(p); refreshProfileList(name);
+  return name;
+}
+// Turn an analysed look into Enhance parameters (shared by the Analyse tab).
+function lookToParams(look) {
+  const { B, C, S, Sh } = look;
+  const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+  return {
+    sharp:    +clamp((Sh - 10) / 70, 0, 1).toFixed(2),
+    denoise:  params.denoise,
+    sat:      +clamp(1 + (S - 30) / 70 * 0.8, 0.6, 1.9).toFixed(2),
+    vib:      +clamp((S - 30) / 70 * 0.4, 0, 0.5).toFixed(2),
+    contrast: +clamp(1 + (C - 40) / 60 * 0.5, 0.6, 1.5).toFixed(2),
+    bright:   +clamp((B - 50) / 100 * 0.4, -0.2, 0.2).toFixed(2),
+    black:    +clamp((C - 40) / 60 * 0.06, 0, 0.08).toFixed(3),
+  };
+}
+
+document.getElementById('profileSave').addEventListener('click', () => saveProfileFromParams(params));
+document.getElementById('profileApply').addEventListener('click', () => {
+  const n = document.getElementById('profileSelect').value; if (!n) return;
+  const p = getProfiles(); if (p[n]) applyParams(p[n]);
+});
+document.getElementById('profileDelete').addEventListener('click', () => {
+  const n = document.getElementById('profileSelect').value; if (!n) return;
+  if (!confirm('Delete profile "' + n + '"?')) return;
+  const p = getProfiles(); delete p[n]; setProfiles(p); refreshProfileList();
+});
+refreshProfileList();
+
 /* ─────────────  Rendering  ───────────── */
 function render() {
   if (!haveFrame || video.readyState < 2) return;
@@ -313,14 +368,21 @@ const dropZone = document.getElementById('dropZone');
 const fileInput = document.getElementById('fileInput');
 const previewWrap = document.getElementById('previewWrap');
 
+let srcFileSize = 0;
+
 function loadFile(file) {
   if (!file || !file.type.startsWith('video/')) {
     setStatus('That doesn\'t look like a video file.', 'err');
     return;
   }
+  srcFileSize = file.size || 0;
   video.src = URL.createObjectURL(file);
   video.muted = true;
-  video.onloadeddata = () => {
+  video.preload = 'auto';
+  video.onloadeddata = async () => {
+    // Many phone / previously-exported clips report duration = Infinity or 0,
+    // which made the recorder stop after ~2s. Force the real duration first.
+    if (!isFinite(video.duration) || video.duration <= 0) await fixDuration();
     haveFrame = true;
     dropZone.hidden = true;
     previewWrap.hidden = false;
@@ -332,6 +394,34 @@ function loadFile(file) {
   };
   video.onended = () => { playBtn.textContent = '▶ Play'; };
 }
+
+// Coax a real duration out of a clip whose metadata says Infinity/0 by seeking
+// far past the end; the browser clamps to the true end and updates duration.
+function fixDuration() {
+  return new Promise((res) => {
+    let done = false;
+    const finish = () => {
+      if (done) return; done = true;
+      video.removeEventListener('durationchange', check);
+      video.removeEventListener('timeupdate', check);
+      try { video.currentTime = 0; } catch (_) {}
+      res();
+    };
+    const check = () => { if (isFinite(video.duration) && video.duration > 0) finish(); };
+    video.addEventListener('durationchange', check);
+    video.addEventListener('timeupdate', check);
+    try { video.currentTime = 1e101; } catch (_) { finish(); }
+    setTimeout(finish, 2500);   // safety: never hang the load
+  });
+}
+
+// Keep the screen awake during export so mobile dimming can't stall capture.
+let wakeLock = null;
+async function acquireWake() {
+  try { if ('wakeLock' in navigator) wakeLock = await navigator.wakeLock.request('screen'); }
+  catch (_) { /* not supported / denied — fine */ }
+}
+function releaseWake() { try { wakeLock && wakeLock.release(); } catch (_) {} wakeLock = null; }
 
 dropZone.addEventListener('click', () => fileInput.click());
 fileInput.addEventListener('change', () => loadFile(fileInput.files[0]));
@@ -570,6 +660,7 @@ exportBtn.addEventListener('click', async () => {
   exportBtn.disabled = true;
   compare = false; compareChk.checked = false;
   const wasMuted = video.muted;
+  await acquireWake();
 
   const mbps = getQuality().mbps;
   const fps = 60;   // keep 60 for smooth gameplay
@@ -579,8 +670,14 @@ exportBtn.addEventListener('click', async () => {
   render();
 
   // Build the output stream: processed canvas video + original audio.
+  // Manual-capture mode (captureStream(0) + requestFrame per decoded video
+  // frame) makes recording deterministic instead of relying on the animation
+  // loop, which the browser throttles when the screen dims — the old cause of
+  // clips getting cut short.
   const muteOut = document.getElementById('muteChk').checked;
-  const stream = canvas.captureStream(fps);
+  const useManual = 'requestVideoFrameCallback' in video;
+  const stream = canvas.captureStream(useManual ? 0 : fps);
+  const vTrack = stream.getVideoTracks()[0];
   if (!muteOut) {
     try {
       video.muted = false;                       // needed so audio is in the capture
@@ -611,27 +708,37 @@ exportBtn.addEventListener('click', async () => {
     '<div class="progress"><i id="pbar"></i></div>', 'busy');
 
   const start = inPoint, end = effOut();
+  let safetyTimer = 0;
   const onProg = () => {
-    // Stop recording at the trim-out point.
-    if (outPoint != null && video.currentTime >= outPoint) { finish(); return; }
+    // Stop at the trim-out point OR the true end of the clip (backup to 'ended').
+    if (video.currentTime >= end - 0.05) { finish(); return; }
     const pb = document.getElementById('pbar');
     if (pb && end > start) pb.style.width = ((video.currentTime - start) / (end - start) * 100) + '%';
   };
   video.addEventListener('timeupdate', onProg);
 
   rec.onstop = () => {
+    clearTimeout(safetyTimer);
     video.removeEventListener('timeupdate', onProg);
     video.removeEventListener('ended', finish);
     video.muted = wasMuted;
+    releaseWake();
     const blob = new Blob(chunks, { type: mime });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `enhanced_${outW}x${outH}.${ext}`;
+    a.download = `losinn_${outW}x${outH}.${ext}`;
     a.click();
     setTimeout(() => URL.revokeObjectURL(url), 4000);
-    const mb = (blob.size / 1048576).toFixed(1);
-    setStatus(`✓ Done — <b>enhanced_${outW}x${outH}.${ext}</b> (${mb} MB) downloaded.`, '');
+    const outMB = blob.size / 1048576;
+    let msg = `✓ Saved <b>losinn_${outW}x${outH}.${ext}</b> — ${outMB.toFixed(1)} MB`;
+    if (srcFileSize) {
+      const inMB = srcFileSize / 1048576;
+      const pct = Math.round((1 - blob.size / srcFileSize) * 100);
+      msg += pct > 0 ? `, <b>${pct}% smaller</b> than the ${inMB.toFixed(1)} MB original.`
+                     : ` (original ${inMB.toFixed(1)} MB — pick a smaller quality option to shrink it).`;
+    } else msg += '.';
+    setStatus(msg, '');
     recording = false;
     exportBtn.disabled = false;
     playBtn.textContent = '▶ Play';
@@ -646,9 +753,22 @@ exportBtn.addEventListener('click', async () => {
   video.onseeked = null;
 
   rec.start(250);   // flush data every 250ms so the file finalises cleanly
+  // Hard safety net: if playback stalls or 'ended' never fires, stop anyway.
+  safetyTimer = setTimeout(finish, (end - start) * 1000 + 5000);
   try { await video.play(); }
   catch (err) { setStatus('Playback blocked: ' + err.message, 'err'); finish(); }
   playBtn.textContent = '❚❚ Recording…';
+
+  // Render + push one frame per decoded video frame (deterministic capture).
+  if (useManual) {
+    const pump = () => {
+      if (!recording) return;
+      render();
+      try { vTrack.requestFrame && vTrack.requestFrame(); } catch (_) {}
+      video.requestVideoFrameCallback(pump);
+    };
+    video.requestVideoFrameCallback(pump);
+  }
 });
 
 /* ─────────────  Info tabs content  ───────────── */
@@ -761,26 +881,22 @@ document.getElementById('tab-tiktok').innerHTML = `
 
   let lastLook = null;
 
-  // Map an analysed look to Enhance slider starting points, then jump there.
-  // Approximate on purpose: the Enhance sliders are adjustments applied to
-  // whatever clip you load, so these push a clip toward the analysed look.
+  // Map an analysed look to Enhance settings, then jump there. Approximate on
+  // purpose: the Enhance sliders are adjustments applied to whatever clip you
+  // load, so these push a clip toward the analysed look.
   document.getElementById('anUse').addEventListener('click', () => {
     if (!lastLook) return;
-    const { B, C, S, Sh } = lastLook;
-    const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
-    params.sat      = +clamp(1 + (S - 30) / 70 * 0.8, 0.6, 1.9).toFixed(2);
-    params.contrast = +clamp(1 + (C - 40) / 60 * 0.5, 0.6, 1.5).toFixed(2);
-    params.sharp    = +clamp((Sh - 10) / 70, 0, 1).toFixed(2);
-    params.bright   = +clamp((B - 50) / 100 * 0.4, -0.2, 0.2).toFixed(2);
-    params.vib      = +clamp((S - 30) / 70 * 0.4, 0, 0.5).toFixed(2);
-    params.black    = +clamp((C - 40) / 60 * 0.06, 0, 0.08).toFixed(3);
-    markPresetCustom();
-    syncUI();
-    if (typeof haveFrame !== 'undefined' && haveFrame) render();
-    saveSettings();
+    applyParams(lookToParams(lastLook));
     document.querySelector('.tab[data-tab="enhance"]').click();
     const es = document.getElementById('exportStatus');
     if (es) { es.className = 'export-status'; es.textContent = 'Loaded these readings as a starting point — tweak to taste.'; }
+  });
+
+  // Save the analysed look straight to a reusable profile.
+  document.getElementById('anSaveProfile').addEventListener('click', () => {
+    if (!lastLook) return;
+    const name = saveProfileFromParams(lookToParams(lastLook));
+    if (name) document.getElementById('anSummary').innerHTML += ` <b>Saved as profile "${name}".</b>`;
   });
 
   const seek = (t) => new Promise(res => {

@@ -13,8 +13,8 @@
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="losinn qual">
-<link rel="stylesheet" href="style.css?v=6">
-<link rel="stylesheet" href="enhance.css?v=5">
+<link rel="stylesheet" href="style.css?v=7">
+<link rel="stylesheet" href="enhance.css?v=6">
 </head>
 <body>
 
@@ -69,9 +69,19 @@
   </section>
 
   <section class="panel enh-controls">
-    <h2 class="panel-title">Enhance</h2>
-
+    <h2 class="panel-title">Presets</h2>
     <div class="preset-row" id="presetRow"></div>
+
+    <div class="profiles" id="profilesBox">
+      <div class="profiles-row">
+        <select id="profileSelect"><option value="">Your saved profiles…</option></select>
+        <button class="btn btn-ghost" id="profileApply" title="Apply">Apply</button>
+        <button class="btn btn-ghost" id="profileDelete" title="Delete profile">✕</button>
+      </div>
+      <button class="btn btn-ghost profile-save" id="profileSave">＋ Save current look as a profile</button>
+    </div>
+
+    <h2 class="panel-title" style="margin-top:22px">Adjust</h2>
 
     <div class="ctrl" data-min="0" data-max="1" data-step="0.01">
       <div class="ctrl-head"><span>Sharpness</span><span class="ctrl-val" id="v-sharp"></span></div>
@@ -135,7 +145,8 @@
     <div class="field-row">
       <label>Quality</label>
       <select id="qualitySelect">
-        <option value="1920|12">HD · 1080p — smaller file</option>
+        <option value="1280|5">Compact · 720p — smallest file</option>
+        <option value="1920|8">HD · 1080p — small &amp; sharp</option>
         <option value="1920|16" selected>Full HD · 1080p — best for TikTok</option>
         <option value="2560|24">Ultra HD · 2K (1440p)</option>
         <option value="3840|40">Ultra HD · 4K (2160p) — heaviest</option>
@@ -178,8 +189,9 @@
       <div class="an-summary" id="anSummary"></div>
       <div id="anMetrics"></div>
       <div class="an-actions">
-        <button class="btn btn-accent" id="anUse">Use as Enhance starting point →</button>
-        <button class="btn btn-secondary" id="anAgain">Analyse another clip</button>
+        <button class="btn btn-accent" id="anUse">Use in Enhance →</button>
+        <button class="btn btn-secondary" id="anSaveProfile">Save as profile</button>
+        <button class="btn btn-secondary" id="anAgain">Analyse another</button>
       </div>
     </div>
 
@@ -198,6 +210,6 @@
 <!-- ─────────────  TIKTOK TAB  ───────────── -->
 <main class="info-layout tab-panel" id="tab-tiktok" hidden></main>
 
-<script src="enhance.js?v=6"></script>
+<script src="enhance.js?v=7"></script>
 </body>
 </html>
