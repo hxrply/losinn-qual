@@ -354,6 +354,8 @@ function updateQualityNote() {
     msg += ` Upscaling from ${long}p — the sharpen + grade do the visible work; it won't add real detail past the source.`;
   else if (res && long && res < long)
     msg += ` Downscaling from ${long}p — sharper and smaller, ideal for TikTok.`;
+  if (res >= 2560)
+    msg += ` ⚠ On phones, 2K/4K can drop frames while recording (real-time limit) — 1080p stays smoothest, and TikTok shows everything at 1080p anyway.`;
   note.textContent = msg;
 }
 
@@ -670,14 +672,12 @@ exportBtn.addEventListener('click', async () => {
   render();
 
   // Build the output stream: processed canvas video + original audio.
-  // Manual-capture mode (captureStream(0) + requestFrame per decoded video
-  // frame) makes recording deterministic instead of relying on the animation
-  // loop, which the browser throttles when the screen dims — the old cause of
-  // clips getting cut short.
+  // Auto-capture samples the canvas continuously at up to `fps`; combined with
+  // the per-frame render pump below this keeps the output at full frame rate.
+  // (The old manual captureStream(0)+requestFrame mode under-captured and made
+  // clips choppy.)
   const muteOut = document.getElementById('muteChk').checked;
-  const useManual = 'requestVideoFrameCallback' in video;
-  const stream = canvas.captureStream(useManual ? 0 : fps);
-  const vTrack = stream.getVideoTracks()[0];
+  const stream = canvas.captureStream(fps);
   if (!muteOut) {
     try {
       video.muted = false;                       // needed so audio is in the capture
@@ -759,12 +759,13 @@ exportBtn.addEventListener('click', async () => {
   catch (err) { setStatus('Playback blocked: ' + err.message, 'err'); finish(); }
   playBtn.textContent = '❚❚ Recording…';
 
-  // Render + push one frame per decoded video frame (deterministic capture).
-  if (useManual) {
+  // Render on every decoded video frame so the captured canvas stays at the
+  // clip's real frame rate (auto-capture then samples it) — smooth, not choppy,
+  // and not tied to the throttled animation loop.
+  if ('requestVideoFrameCallback' in video) {
     const pump = () => {
       if (!recording) return;
       render();
-      try { vTrack.requestFrame && vTrack.requestFrame(); } catch (_) {}
       video.requestVideoFrameCallback(pump);
     };
     video.requestVideoFrameCallback(pump);
