@@ -1,3 +1,6 @@
+/* Never allow sideways scrolling on phones. */
+html, body { max-width: 100%; overflow-x: hidden; }
+
 /* ── Nav in topbar ── */
 .nav {
   margin-left: auto;
@@ -115,7 +118,10 @@
   border: 1px solid var(--border);
   display: block;
   margin: 0 auto;
-  touch-action: none;   /* let us drag the before/after split on touch */
+  /* pan-y = you can still scroll the page vertically by swiping over the canvas,
+     while horizontal drags go to the before/after split. (touch-action:none used
+     to swallow scroll gestures, which made the page feel stuck on mobile.) */
+  touch-action: pan-y;
 }
 #srcVideo { display: none; }
 
@@ -323,10 +329,10 @@ input[type=range]::-moz-range-thumb {
   .tabbar { max-width: calc(100% - 20px); }
   .tab { padding: 11px 15px; white-space: nowrap; font-size: 13.5px; }
 
-  .enh-layout, .info-layout { padding: 12px 12px 90px; gap: 16px; }
+  .enh-layout, .info-layout { padding: 12px 12px 28px; gap: 16px; }
   .info-card { padding: 18px 16px; }
 
-  #glcanvas { max-height: 48vh; }
+  #glcanvas { max-height: 46vh; }
   .drop-zone { min-height: 200px; }
   .drop-title { font-size: 16px; }
 
@@ -350,12 +356,7 @@ input[type=range]::-moz-range-thumb {
   .field-row label { font-size: 13.5px; }
   .field-row select { padding: 12px 10px; font-size: 14px; }
 
-  /* Keep Export reachable: pin it to the bottom of the screen. */
-  .enh-controls .btn-launch {
-    position: sticky; bottom: 12px; z-index: 5;
-    padding: 17px; font-size: 16px;
-    box-shadow: 0 6px 24px rgba(0,0,0,0.55);
-  }
+  .enh-controls .btn-launch { padding: 17px; font-size: 16px; }
 
   /* Stack the setting table so it never overflows a narrow screen. */
   .setting-table td { display: block; width: auto; }

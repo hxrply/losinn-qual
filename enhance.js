@@ -355,7 +355,9 @@ function updateQualityNote() {
   else if (res && long && res < long)
     msg += ` Downscaling from ${long}p — sharper and smaller, ideal for TikTok.`;
   if (res >= 2560)
-    msg += ` ⚠ On phones, 2K/4K can drop frames while recording (real-time limit) — 1080p stays smoothest, and TikTok shows everything at 1080p anyway.`;
+    msg += canWebCodecs()
+      ? ` 2K/4K keeps every frame here, just takes a little longer to process. (TikTok still shows it at 1080p.)`
+      : ` ⚠ On this browser, 2K/4K can drop frames while recording — 1080p stays smoothest.`;
   note.textContent = msg;
 }
 
@@ -371,6 +373,7 @@ const fileInput = document.getElementById('fileInput');
 const previewWrap = document.getElementById('previewWrap');
 
 let srcFileSize = 0;
+let curFile = null;
 
 function loadFile(file) {
   if (!file || !file.type.startsWith('video/')) {
@@ -378,6 +381,7 @@ function loadFile(file) {
     return;
   }
   srcFileSize = file.size || 0;
+  curFile = file;
   video.src = URL.createObjectURL(file);
   video.muted = true;
   video.preload = 'auto';
@@ -625,14 +629,18 @@ function pickMime() {
 // Report the export format up front so nobody's surprised by a .webm, and warn
 // about the main TikTok "couldn't decode" cause (webm / iOS recorder).
 (function noteFormat() {
-  const mime = pickMime();
   const note = document.getElementById('fmtNote');
-  if (!mime) { note.textContent = 'Recording isn\'t supported in this browser — use Chrome or Edge.'; return; }
+  if (canWebCodecs()) {
+    note.innerHTML = 'Exports <b>.mp4 (H.264)</b> frame-by-frame — keeps every frame, does real 4K, and shrinks the file. TikTok-ready.';
+    return;
+  }
+  const mime = pickMime();
+  if (!mime) { note.textContent = 'Video export isn\'t supported in this browser — use Chrome or Edge.'; return; }
   if (mime.startsWith('video/mp4'))
     note.innerHTML = 'Exports <b>.mp4 (H.264)</b> — TikTok reads this directly.';
   else
-    note.innerHTML = 'This browser records <b>.webm</b>, which is what TikTok often <b>can\'t decode</b>. ' +
-      'For a TikTok-ready .mp4, export in <b>Chrome or Edge on a computer</b> (or re-save the .webm through CapCut).';
+    note.innerHTML = 'This browser records <b>.webm</b>, which TikTok often <b>can\'t decode</b>. ' +
+      'For a TikTok-ready .mp4, use <b>Chrome or Edge</b>.';
 })();
 
 // Phone support: works on Android Chrome and modern iOS Safari. Pick a clip
@@ -653,10 +661,191 @@ function pickMime() {
 
 let recording = false;
 
+function resetExportState() {
+  recording = false;
+  exportBtn.disabled = false;
+  try { video.pause(); } catch (_) {}
+  releaseWake();
+  playBtn.textContent = '▶ Play';
+}
+
+function downloadBlob(blob, name, audioDropped) {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = name; a.click();
+  setTimeout(() => URL.revokeObjectURL(url), 5000);
+  const outMB = blob.size / 1048576;
+  let msg = `✓ Saved <b>${name}</b> — ${outMB.toFixed(1)} MB`;
+  if (srcFileSize) {
+    const inMB = srcFileSize / 1048576;
+    const pct = Math.round((1 - blob.size / srcFileSize) * 100);
+    msg += pct > 0 ? `, <b>${pct}% smaller</b> than the ${inMB.toFixed(1)} MB original.`
+                   : ` (original ${inMB.toFixed(1)} MB — try a smaller quality option to shrink it).`;
+  } else msg += '.';
+  if (audioDropped) msg += ' <b>Audio couldn\'t be kept — add a sound in TikTok.</b>';
+  setStatus(msg, '');
+}
+
+// True when we can do the proper offline, frame-by-frame transcode (Pixel 10 /
+// modern Chrome). This keeps every frame, does real 4K, and controls file size.
+function canWebCodecs() {
+  return typeof VideoEncoder !== 'undefined' && typeof VideoFrame !== 'undefined' &&
+    window.Mp4Muxer && ('requestVideoFrameCallback' in video);
+}
+
 exportBtn.addEventListener('click', async () => {
   if (recording || !haveFrame) return;
+  if (canWebCodecs()) {
+    try { await webcodecsExport(); return; }
+    catch (e) {
+      console.warn('Offline encoder fell back:', e);
+      resetExportState();
+      setStatus('Switching to the standard recorder…', 'busy');
+    }
+  }
+  await mediaRecorderExport();
+});
+
+/* ── Offline WebCodecs transcode: keeps every frame, true 4K, small files ── */
+async function webcodecsExport() {
+  const q = getQuality();
+  const width = canvas.width, height = canvas.height;
+  const bitrate = Math.max(2_000_000, q.mbps * 1_000_000);
+  const start = inPoint, end = effOut();
+  const dur = Math.max(0.1, end - start);
+  const muteOut = document.getElementById('muteChk').checked;
+  const wasMuted = video.muted;
+
+  recording = true; exportBtn.disabled = true;
+  compare = false; compareChk.checked = false;
+  await acquireWake();
+  setStatus(`<span>Processing every frame at ${width}×${height} — keep this tab open…</span>` +
+    '<div class="progress"><i id="pbar"></i></div>', 'busy');
+  playBtn.textContent = '⏳ Processing…';
+
+  // 1. Decode source audio up front (best-effort) so the muxer track matches it.
+  let audioInfo = null;
+  if (!muteOut && curFile) {
+    try {
+      const ab = await curFile.arrayBuffer();
+      const ac = new (window.AudioContext || window.webkitAudioContext)();
+      const buf = await ac.decodeAudioData(ab.slice(0));
+      ac.close();
+      if (buf.length > 0) audioInfo = { buf, sampleRate: buf.sampleRate, channels: Math.min(2, buf.numberOfChannels) };
+    } catch (_) { audioInfo = null; }
+  }
+
+  // 2. Muxer + hardware H.264 video encoder.
+  const target = new Mp4Muxer.ArrayBufferTarget();
+  const muxer = new Mp4Muxer.Muxer(Object.assign({
+    target, fastStart: 'in-memory',
+    video: { codec: 'avc', width, height },
+  }, audioInfo ? { audio: { codec: 'aac', numberOfChannels: audioInfo.channels, sampleRate: audioInfo.sampleRate } } : {}));
+
+  let vcfg = { codec: 'avc1.640028', width, height, bitrate, framerate: 60 };
+  if (!(await VideoEncoder.isConfigSupported(vcfg)).supported) {
+    vcfg.codec = 'avc1.42001f';
+    if (!(await VideoEncoder.isConfigSupported(vcfg)).supported) vcfg.codec = 'avc1.42E01E';
+  }
+  let encErr = null;
+  const encoder = new VideoEncoder({
+    output: (c, m) => { try { muxer.addVideoChunk(c, m); } catch (e) { encErr = e; } },
+    error: (e) => { encErr = e; },
+  });
+  encoder.configure(vcfg);
+
+  // 3. Walk the clip frame-by-frame. Encoder back-pressure pauses playback when
+  //    it falls behind, so no frames are ever dropped (unlike real-time capture).
+  video.muted = true;
+  video.pause();
+  video.currentTime = start;
+  await new Promise(r => { video.onseeked = r; }); video.onseeked = null;
+
+  let frameCount = 0;
+  await new Promise((resolve, reject) => {
+    let finished = false;
+    const done = (err) => { if (finished) return; finished = true; err ? reject(err) : resolve(); };
+    const step = async (now, meta) => {
+      try {
+        if (encErr) return done(encErr);
+        const t = (meta && typeof meta.mediaTime === 'number') ? meta.mediaTime : video.currentTime;
+        if (t > end + 0.02) return done();
+        render();
+        const vf = new VideoFrame(canvas, { timestamp: Math.max(0, (t - start)) * 1e6, duration: 16667 });
+        encoder.encode(vf, { keyFrame: frameCount % 150 === 0 });
+        vf.close();
+        frameCount++;
+        const pb = document.getElementById('pbar');
+        if (pb) pb.style.width = Math.min(100, (t - start) / dur * 100) + '%';
+        if (encoder.encodeQueueSize > 12) {
+          video.pause();
+          let guard = 0;
+          while (encoder.encodeQueueSize > 4 && !encErr && guard++ < 3000) await new Promise(r => setTimeout(r, 5));
+          if (finished) return;
+          if (!video.ended && t <= end) { try { await video.play(); } catch (_) {} }
+        }
+        if (finished) return;
+        if (video.ended) return done();
+        video.requestVideoFrameCallback(step);
+      } catch (e) { done(e); }
+    };
+    video.addEventListener('ended', () => done(), { once: true });
+    video.play().then(() => video.requestVideoFrameCallback(step)).catch(e => done(e));
+    setTimeout(() => done(), dur * 1000 * 6 + 20000);   // hard safety net
+  });
+
+  video.pause();
+  video.muted = wasMuted;
+  if (encErr) { try { encoder.close(); } catch (_) {} releaseWake(); throw encErr; }
+  if (frameCount < 2) { try { encoder.close(); } catch (_) {} releaseWake(); throw new Error('No frames captured'); }
+  await encoder.flush();
+  try { encoder.close(); } catch (_) {}
+
+  // 4. Audio (offline, best-effort — silent export if it fails).
+  let audioKept = false;
+  if (audioInfo) { try { audioKept = await encodeAudioRange(audioInfo, muxer, start, end); } catch (_) { audioKept = false; } }
+
+  muxer.finalize();
+  const blob = new Blob([target.buffer], { type: 'video/mp4' });
+  releaseWake();
+  recording = false; exportBtn.disabled = false; playBtn.textContent = '▶ Play';
+  downloadBlob(blob, `losinn_${width}x${height}.mp4`, !!audioInfo && !audioKept);
+}
+
+async function encodeAudioRange(info, muxer, start, end) {
+  const { buf, sampleRate, channels } = info;
+  let aerr = null;
+  const aenc = new AudioEncoder({
+    output: (c, m) => { try { muxer.addAudioChunk(c, m); } catch (e) { aerr = e; } },
+    error: (e) => { aerr = e; },
+  });
+  const acfg = { codec: 'mp4a.40.2', sampleRate, numberOfChannels: channels, bitrate: 128000 };
+  if (!(await AudioEncoder.isConfigSupported(acfg)).supported) return false;
+  aenc.configure(acfg);
+  const chData = [];
+  for (let c = 0; c < channels; c++) chData.push(buf.getChannelData(c));
+  const startS = Math.max(0, Math.floor(start * sampleRate));
+  const endS = Math.min(buf.length, Math.ceil(end * sampleRate));
+  const CH = 4096;
+  for (let pos = startS; pos < endS && !aerr; pos += CH) {
+    const n = Math.min(CH, endS - pos);
+    const planar = new Float32Array(n * channels);
+    for (let c = 0; c < channels; c++) planar.set(chData[c].subarray(pos, pos + n), c * n);
+    const adata = new AudioData({
+      format: 'f32-planar', sampleRate, numberOfFrames: n, numberOfChannels: channels,
+      timestamp: Math.round((pos - startS) / sampleRate * 1e6), data: planar,
+    });
+    aenc.encode(adata); adata.close();
+  }
+  await aenc.flush();
+  try { aenc.close(); } catch (_) {}
+  return !aerr;
+}
+
+/* ── Fallback: real-time MediaRecorder (older browsers without WebCodecs) ── */
+async function mediaRecorderExport() {
   const mime = pickMime();
-  if (!mime) { setStatus('Your browser can\'t record video. Use Chrome or Edge.', 'err'); return; }
+  if (!mime) { setStatus('Your browser can\'t export video. Use Chrome or Edge.', 'err'); resetExportState(); return; }
 
   recording = true;
   exportBtn.disabled = true;
@@ -665,52 +854,37 @@ exportBtn.addEventListener('click', async () => {
   await acquireWake();
 
   const mbps = getQuality().mbps;
-  const fps = 60;   // keep 60 for smooth gameplay
-
-  // Draw a fresh frame first so the stream starts on real content, not a blank
-  // or stale canvas (a blank first frame can corrupt the file's start).
+  const fps = 60;
   render();
 
-  // Build the output stream: processed canvas video + original audio.
-  // Auto-capture samples the canvas continuously at up to `fps`; combined with
-  // the per-frame render pump below this keeps the output at full frame rate.
-  // (The old manual captureStream(0)+requestFrame mode under-captured and made
-  // clips choppy.)
   const muteOut = document.getElementById('muteChk').checked;
   const stream = canvas.captureStream(fps);
   if (!muteOut) {
     try {
-      video.muted = false;                       // needed so audio is in the capture
+      video.muted = false;
       const audio = video.captureStream ? video.captureStream()
                   : video.mozCaptureStream ? video.mozCaptureStream() : null;
       if (audio) audio.getAudioTracks().forEach(t => stream.addTrack(t));
-    } catch (_) { /* no audio track — export silent video */ }
+    } catch (_) {}
   }
 
   let rec;
   try {
-    rec = new MediaRecorder(stream, {
-      mimeType: mime,
-      videoBitsPerSecond: mbps * 1_000_000,
-      audioBitsPerSecond: 192_000,
-    });
+    rec = new MediaRecorder(stream, { mimeType: mime, videoBitsPerSecond: mbps * 1_000_000, audioBitsPerSecond: 192_000 });
   } catch (err) {
     setStatus('Could not start recorder: ' + err.message, 'err');
-    recording = false; exportBtn.disabled = false; video.muted = wasMuted;
+    recording = false; exportBtn.disabled = false; video.muted = wasMuted; releaseWake();
     return;
   }
 
   const chunks = [];
   rec.ondataavailable = (e) => { if (e.data.size) chunks.push(e.data); };
-
   const ext = mime.startsWith('video/mp4') ? 'mp4' : 'webm';
-  setStatus('<span>Rendering in real time — keep this tab open…</span>' +
-    '<div class="progress"><i id="pbar"></i></div>', 'busy');
+  setStatus('<span>Rendering in real time — keep this tab open…</span><div class="progress"><i id="pbar"></i></div>', 'busy');
 
   const start = inPoint, end = effOut();
   let safetyTimer = 0;
   const onProg = () => {
-    // Stop at the trim-out point OR the true end of the clip (backup to 'ended').
     if (video.currentTime >= end - 0.05) { finish(); return; }
     const pb = document.getElementById('pbar');
     if (pb && end > start) pb.style.width = ((video.currentTime - start) / (end - start) * 100) + '%';
@@ -724,24 +898,8 @@ exportBtn.addEventListener('click', async () => {
     video.muted = wasMuted;
     releaseWake();
     const blob = new Blob(chunks, { type: mime });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `losinn_${outW}x${outH}.${ext}`;
-    a.click();
-    setTimeout(() => URL.revokeObjectURL(url), 4000);
-    const outMB = blob.size / 1048576;
-    let msg = `✓ Saved <b>losinn_${outW}x${outH}.${ext}</b> — ${outMB.toFixed(1)} MB`;
-    if (srcFileSize) {
-      const inMB = srcFileSize / 1048576;
-      const pct = Math.round((1 - blob.size / srcFileSize) * 100);
-      msg += pct > 0 ? `, <b>${pct}% smaller</b> than the ${inMB.toFixed(1)} MB original.`
-                     : ` (original ${inMB.toFixed(1)} MB — pick a smaller quality option to shrink it).`;
-    } else msg += '.';
-    setStatus(msg, '');
-    recording = false;
-    exportBtn.disabled = false;
-    playBtn.textContent = '▶ Play';
+    recording = false; exportBtn.disabled = false; playBtn.textContent = '▶ Play';
+    downloadBlob(blob, `losinn_${outW}x${outH}.${ext}`, false);
   };
 
   const finish = () => { if (rec.state !== 'inactive') rec.stop(); video.pause(); };
@@ -752,25 +910,17 @@ exportBtn.addEventListener('click', async () => {
   await new Promise(r => { video.onseeked = r; });
   video.onseeked = null;
 
-  rec.start(250);   // flush data every 250ms so the file finalises cleanly
-  // Hard safety net: if playback stalls or 'ended' never fires, stop anyway.
+  rec.start(250);
   safetyTimer = setTimeout(finish, (end - start) * 1000 + 5000);
   try { await video.play(); }
   catch (err) { setStatus('Playback blocked: ' + err.message, 'err'); finish(); }
   playBtn.textContent = '❚❚ Recording…';
 
-  // Render on every decoded video frame so the captured canvas stays at the
-  // clip's real frame rate (auto-capture then samples it) — smooth, not choppy,
-  // and not tied to the throttled animation loop.
   if ('requestVideoFrameCallback' in video) {
-    const pump = () => {
-      if (!recording) return;
-      render();
-      video.requestVideoFrameCallback(pump);
-    };
+    const pump = () => { if (!recording) return; render(); video.requestVideoFrameCallback(pump); };
     video.requestVideoFrameCallback(pump);
   }
-});
+}
 
 /* ─────────────  Info tabs content  ───────────── */
 document.getElementById('tab-capcut').innerHTML = `
