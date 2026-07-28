@@ -78,9 +78,16 @@ limited).
 
 ## Export notes
 
-- Exports **MP4** frame-by-frame via WebCodecs in Chrome/Edge — every frame kept,
-  real 4K, controlled file size. Older browsers fall back to a real-time
-  `MediaRecorder` capture, and some to `.webm`.
+- Exports **MP4** via WebCodecs in Chrome/Edge. The clip is walked **by seeking to
+  every frame in turn**, not by playing it back: playback capture only ever sees
+  the frames the browser manages to present, so at heavy settings it skipped
+  frames and baked the gaps into the file as visible stutter. Seeking costs
+  wall-clock time but is frame-exact at any setting, and emits a constant frame
+  rate. Older browsers fall back to a real-time `MediaRecorder` capture, and some
+  to `.webm`.
+- Export runs **as fast as the GPU allows, not in real time** — heavy settings
+  take longer than the clip itself. Progress shows frames done, throughput and an
+  ETA, and the Export button becomes **Cancel** while it runs.
 - H.264 by default (plays everywhere). **H.265/HEVC** is offered when the machine
   has an HEVC encoder, and the option greys itself out when it doesn't.
 - Bitrate is derived the way an encoder front-end does it — **bits per pixel per

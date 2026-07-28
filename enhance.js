@@ -39,7 +39,11 @@ document.getElementById('tabbar').addEventListener('click', (e) => {
  * WebGL2 where available (better non-power-of-two handling), WebGL1 otherwise.
  * The shaders are written in GLSL ES 1.00, which both accept. */
 const canvas = document.getElementById('glcanvas');
-const glOpts = { preserveDrawingBuffer: true, alpha: false, antialias: false, depth: false, stencil: false };
+// preserveDrawingBuffer stays off: it forces the driver to keep a second copy of
+// the surface every frame, which at 4K is an extra 33MB of traffic per frame for
+// nothing. Every reader of this canvas (VideoFrame during export, captureStream
+// in the fallback recorder) samples it before the compositor can clear it.
+const glOpts = { preserveDrawingBuffer: false, alpha: false, antialias: false, depth: false, stencil: false };
 const gl = canvas.getContext('webgl2', glOpts) || canvas.getContext('webgl', glOpts);
 
 const VERT = `
@@ -942,7 +946,7 @@ function updateQualityNote() {
 
   if (outLong >= 2560)
     msg += canWebCodecs()
-      ? ` 2K/4K keeps every frame here, it just takes longer. (TikTok still shows it at 1080p.)`
+      ? ` Every frame is processed one at a time rather than recorded in real time, so 2K/4K takes noticeably longer than the clip itself — and TikTok shows it at 1080p either way.`
       : ` ⚠ On this browser, 2K/4K can drop frames while recording — 1080p stays smoothest.`;
   note.textContent = msg;
 }
@@ -1483,8 +1487,10 @@ function pickMime() {
 // True when we can do the proper offline, frame-by-frame transcode (modern
 // Chrome/Edge). This keeps every frame, does real 4K, and controls file size.
 function canWebCodecs() {
+  // No requestVideoFrameCallback requirement: the export walks the clip by
+  // seeking, so it doesn't depend on the browser presenting frames on schedule.
   return typeof VideoEncoder !== 'undefined' && typeof VideoFrame !== 'undefined' &&
-    window.Mp4Muxer && ('requestVideoFrameCallback' in video);
+    !!window.Mp4Muxer;
 }
 
 /* Find the best encoder configuration this machine will actually accept.
@@ -1583,6 +1589,7 @@ let recording = false;
 function resetExportState() {
   recording = false;
   exportBtn.disabled = false;
+  exportBtn.textContent = '⬇ Export enhanced clip';
   try { video.pause(); } catch (_) {}
   releaseWake();
   setRenderSize(viewW, viewH);
@@ -1606,8 +1613,55 @@ function downloadBlob(blob, name, audioDropped) {
   setStatus(msg, '');
 }
 
+// Seek to an exact time and wait until that frame is really the current one.
+// Setting currentTime to where we already are fires no 'seeked' event in some
+// browsers, so short-circuit that case rather than waiting out the timeout.
+function seekFrame(t) {
+  return new Promise((resolve) => {
+    if (Math.abs(video.currentTime - t) < 1e-4) return resolve();
+    let settled = false;
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      video.removeEventListener('seeked', finish);
+      resolve();
+    };
+    const timer = setTimeout(finish, 3000);    // never hang on a bad seek
+    video.addEventListener('seeked', finish);
+    try { video.currentTime = t; } catch (_) { finish(); }
+  });
+}
+
+function fmtEta(secs) {
+  if (secs < 60) return Math.ceil(secs) + 's';
+  const m = Math.floor(secs / 60);
+  return `${m}m ${Math.ceil(secs - m * 60)}s`;
+}
+
+/* Yield to the event loop without a timer. setTimeout is clamped — to 4ms
+ * normally and to a full second once the tab is backgrounded — so polling the
+ * encoder queue with it turned a sub-millisecond wait into a stall long enough
+ * to dominate the export. A MessageChannel round trip isn't clamped. */
+const yieldNow = (() => {
+  const ch = new MessageChannel();
+  let waiting = [];
+  ch.port1.onmessage = () => { const w = waiting; waiting = []; w.forEach(f => f()); };
+  return () => new Promise(res => { waiting.push(res); ch.port2.postMessage(0); });
+})();
+
+let cancelExport = false;
+
 exportBtn.addEventListener('click', async () => {
-  if (recording || !haveFrame) return;
+  // While an export is running the same button is the cancel control — these
+  // can take a while now that they're frame-exact rather than real time.
+  if (recording) {
+    cancelExport = true;
+    setStatus('Cancelling…', 'busy');
+    return;
+  }
+  if (!haveFrame) return;
+  cancelExport = false;
   if (canWebCodecs()) {
     try { await webcodecsExport(); return; }
     catch (e) {
@@ -1630,10 +1684,12 @@ async function webcodecsExport() {
   const muteOut = document.getElementById('muteChk').checked;
   const wasMuted = video.muted;
 
-  recording = true; exportBtn.disabled = true;
+  recording = true;
+  exportBtn.textContent = '✕ Cancel export';
   compare = false; compareChk.checked = false;
   await acquireWake();
-  setStatus(`<span>Processing every frame at ${width}×${height} — keep this tab open…</span>` +
+  setStatus(`<span>Processing every frame at ${width}×${height} — keep this tab open. ` +
+    `This runs as fast as your GPU allows, not in real time, so heavy settings take longer than the clip.</span>` +
     '<div class="progress"><i id="pbar"></i></div><span id="pdet"></span>', 'busy');
   playBtn.textContent = '⏳ Processing…';
 
@@ -1673,62 +1729,75 @@ async function webcodecsExport() {
   });
   encoder.configure(vcfg);
 
-  // 3. Walk the clip frame-by-frame. Encoder back-pressure pauses playback when
-  //    it falls behind, so no frames are ever dropped (unlike real-time capture).
+  // 3. Walk the clip frame by frame by SEEKING to each one, not by playing it.
+  //
+  //    This used to play the clip and encode whatever requestVideoFrameCallback
+  //    handed over. That callback only fires for frames the browser actually
+  //    *presents*: at 4K this pipeline needs longer than a frame interval to
+  //    render one, so the browser skipped ahead and those frames were lost for
+  //    good. Because the timestamps came from mediaTime, every gap got baked
+  //    into the file as a held frame — that was the stuttering. Encoder
+  //    back-pressure never helped, because the encoder was not the slow part.
+  //
+  //    Seeking costs wall-clock time, but it is frame-exact no matter how heavy
+  //    the settings are, and it emits a constant frame rate, which players and
+  //    TikTok both prefer to the variable timing real-time capture produced.
   const frameDur = Math.round(1e6 / plan.fps);
   const gop = Math.max(30, Math.round(plan.fps * 2));   // keyframe every ~2s
+  const stepT = 1 / plan.fps;
+  const total = Math.max(1, Math.ceil(dur / stepT));
+  const lastT = Math.min(end, (video.duration || end) - 1e-3);
+
   video.muted = true;
   video.pause();
-  video.currentTime = start;
-  await new Promise(r => { video.onseeked = r; }); video.onseeked = null;
 
+  const pb = document.getElementById('pbar');
+  const pd = document.getElementById('pdet');
   let frameCount = 0;
   const t0 = performance.now();
-  await new Promise((resolve, reject) => {
-    let finished = false;
-    const done = (err) => { if (finished) return; finished = true; err ? reject(err) : resolve(); };
-    const step = async (now, meta) => {
-      try {
-        if (encErr) return done(encErr);
-        const t = (meta && typeof meta.mediaTime === 'number') ? meta.mediaTime : video.currentTime;
-        if (t > end + 0.02) return done();
-        render();
-        const vf = new VideoFrame(canvas, { timestamp: Math.max(0, t - start) * 1e6, duration: frameDur });
-        encoder.encode(vf, { keyFrame: frameCount % gop === 0 });
-        vf.close();
-        frameCount++;
 
-        const pb = document.getElementById('pbar');
-        if (pb) pb.style.width = Math.min(100, (t - start) / dur * 100) + '%';
-        const pd = document.getElementById('pdet');
-        if (pd && frameCount % 15 === 0) {
-          const elapsed = (performance.now() - t0) / 1000;
-          const frac = Math.max(0.01, (t - start) / dur);
-          const left = Math.max(0, elapsed / frac - elapsed);
-          pd.textContent = `${frameCount} frames · ${(frameCount / elapsed).toFixed(0)} fps · ~${Math.ceil(left)}s left`;
-        }
+  for (let i = 0; i < total; i++) {
+    if (encErr || cancelExport) break;
+    await seekFrame(Math.min(start + i * stepT, lastT));
+    render();
+    const vf = new VideoFrame(canvas, { timestamp: i * frameDur, duration: frameDur });
+    encoder.encode(vf, { keyFrame: i % gop === 0 });
+    vf.close();
+    frameCount++;
 
-        if (encoder.encodeQueueSize > 12) {
-          video.pause();
-          let guard = 0;
-          while (encoder.encodeQueueSize > 4 && !encErr && guard++ < 3000) await new Promise(r => setTimeout(r, 5));
-          if (finished) return;
-          if (!video.ended && t <= end) { try { await video.play(); } catch (_) {} }
-        }
-        if (finished) return;
-        if (video.ended) return done();
-        video.requestVideoFrameCallback(step);
-      } catch (e) { done(e); }
-    };
-    video.addEventListener('ended', () => done(), { once: true });
-    video.play().then(() => video.requestVideoFrameCallback(step)).catch(e => done(e));
-    setTimeout(() => done(), dur * 1000 * 6 + 20000);   // hard safety net
-  });
+    if (pb) pb.style.width = ((i + 1) / total * 100).toFixed(1) + '%';
+    if (pd && i % 4 === 0) {
+      const elapsed = (performance.now() - t0) / 1000;
+      const left = Math.max(0, elapsed / ((i + 1) / total) - elapsed);
+      pd.textContent = `frame ${i + 1} of ${total} · ${((i + 1) / elapsed).toFixed(1)} fps · ~${fmtEta(left)} left`;
+    }
 
-  video.pause();
+    // Keep the encoder queue bounded so a long 4K clip can't balloon memory.
+    let guard = 0;
+    while (encoder.encodeQueueSize > 8 && !encErr && guard++ < 100000) await yieldNow();
+  }
+
   video.muted = wasMuted;
-  if (encErr) { try { encoder.close(); } catch (_) {} releaseWake(); setRenderSize(viewW, viewH); throw encErr; }
-  if (frameCount < 2) { try { encoder.close(); } catch (_) {} releaseWake(); setRenderSize(viewW, viewH); throw new Error('No frames captured'); }
+  const bail = (err) => {
+    try { encoder.close(); } catch (_) {}
+    releaseWake();
+    setRenderSize(viewW, viewH);
+    render();
+    throw err;
+  };
+  if (encErr) bail(encErr);
+  if (cancelExport) {
+    try { encoder.close(); } catch (_) {}
+    releaseWake();
+    recording = false;
+    exportBtn.textContent = '⬇ Export enhanced clip';
+    setRenderSize(viewW, viewH);
+    render();
+    playBtn.textContent = '▶ Play';
+    setStatus('Export cancelled — nothing was saved.', '');
+    return;
+  }
+  if (frameCount < 2) bail(new Error('No frames captured'));
   await encoder.flush();
   try { encoder.close(); } catch (_) {}
 
@@ -1739,7 +1808,10 @@ async function webcodecsExport() {
   muxer.finalize();
   const blob = new Blob([target.buffer], { type: 'video/mp4' });
   releaseWake();
-  recording = false; exportBtn.disabled = false; playBtn.textContent = '▶ Play';
+  recording = false;
+  exportBtn.disabled = false;
+  exportBtn.textContent = '⬇ Export enhanced clip';
+  playBtn.textContent = '▶ Play';
   setRenderSize(viewW, viewH);
   render();
   downloadBlob(blob, `losinn_${width}x${height}.mp4`, !!audioInfo && !audioKept);
