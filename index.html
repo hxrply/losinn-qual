@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <title>losinn qual</title>
-<meta name="description" content="GPU Rainbow Six Siege clip enhancer — sharpen, upscale, grade, trim and export for TikTok. Runs in your browser.">
+<meta name="description" content="GPU Rainbow Six Siege clip enhancer — restore, sharpen, upscale, grade, trim and export for TikTok. Runs in your browser.">
 <meta name="theme-color" content="#060409">
 <link rel="manifest" href="manifest.json">
 <link rel="icon" href="icon.svg" type="image/svg+xml">
@@ -13,14 +13,14 @@
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="losinn qual">
-<link rel="stylesheet" href="style.css?v=7">
-<link rel="stylesheet" href="enhance.css?v=7">
+<link rel="stylesheet" href="style.css?v=8">
+<link rel="stylesheet" href="enhance.css?v=8">
 </head>
 <body>
 
 <header class="topbar">
   <div class="brand"><span class="brand-mark">◎</span> losinn qual</div>
-  <div class="brand-sub">GPU sharpen · upscale · grade · trim · export — tuned for Siege @ 65 brightness</div>
+  <div class="brand-sub">restore · upscale · grade · trim · export — tuned for Siege @ 65 brightness</div>
 </header>
 
 <div class="tabbar" id="tabbar">
@@ -65,11 +65,14 @@
       </div>
 
       <div class="stage-meta" id="stageMeta"></div>
+      <div class="stage-meta pipeline" id="pipelineMeta"></div>
     </div>
   </section>
 
   <section class="panel enh-controls">
     <h2 class="panel-title">Presets</h2>
+    <button class="btn btn-accent btn-auto" id="autoBtn" disabled>✦ Auto-enhance this clip</button>
+    <div class="auto-note" id="autoNote">Reads the clip's own noise, blocking, contrast and colour, then sets every slider for it.</div>
     <div class="preset-row" id="presetRow"></div>
 
     <div class="profiles" id="profilesBox">
@@ -81,49 +84,7 @@
       <button class="btn btn-ghost profile-save" id="profileSave">＋ Save current look as a profile</button>
     </div>
 
-    <h2 class="panel-title" style="margin-top:22px">Adjust</h2>
-
-    <div class="ctrl" data-min="0" data-max="1" data-step="0.01">
-      <div class="ctrl-head"><span>Sharpness</span><span class="ctrl-val" id="v-sharp"></span></div>
-      <input type="range" id="s-sharp" min="0" max="1" step="0.01">
-      <div class="ctrl-note">Crispens edges (CAS — no halos). This is the R6 "clarity" look.</div>
-    </div>
-
-    <div class="ctrl">
-      <div class="ctrl-head"><span>Denoise / smooth</span><span class="ctrl-val" id="v-denoise"></span></div>
-      <input type="range" id="s-denoise" min="0" max="1" step="0.01">
-      <div class="ctrl-note">Cleans up dark-scene grain from Xbox compression. Keep low or it softens.</div>
-    </div>
-
-    <div class="ctrl">
-      <div class="ctrl-head"><span>Saturation</span><span class="ctrl-val" id="v-sat"></span></div>
-      <input type="range" id="s-sat" min="0" max="2" step="0.01">
-      <div class="ctrl-note">Colour intensity.</div>
-    </div>
-
-    <div class="ctrl">
-      <div class="ctrl-head"><span>Vibrance</span><span class="ctrl-val" id="v-vib"></span></div>
-      <input type="range" id="s-vib" min="0" max="1" step="0.01">
-      <div class="ctrl-note">Boosts dull colours without blowing out skin/UI. Better than raw saturation.</div>
-    </div>
-
-    <div class="ctrl">
-      <div class="ctrl-head"><span>Contrast</span><span class="ctrl-val" id="v-contrast"></span></div>
-      <input type="range" id="s-contrast" min="0.5" max="1.6" step="0.01">
-      <div class="ctrl-note">Punch. Helps recover depth lost at 65 in-game brightness.</div>
-    </div>
-
-    <div class="ctrl">
-      <div class="ctrl-head"><span>Brightness</span><span class="ctrl-val" id="v-bright"></span></div>
-      <input type="range" id="s-bright" min="-0.25" max="0.25" step="0.01">
-      <div class="ctrl-note">Overall exposure. Nudge down slightly if 65 brightness looks washed out.</div>
-    </div>
-
-    <div class="ctrl">
-      <div class="ctrl-head"><span>Deepen blacks</span><span class="ctrl-val" id="v-black"></span></div>
-      <input type="range" id="s-black" min="0" max="0.2" step="0.005">
-      <div class="ctrl-note">Key setting for R6 at 65 brightness — pulls the lifted, greyish blacks back down so the clip has real contrast.</div>
-    </div>
+    <div id="ctrlGroups"></div>
 
     <h2 class="panel-title" style="margin-top:22px">Framing</h2>
 
@@ -140,19 +101,37 @@
       <div class="ctrl-note">Slide to choose which part of the wide clip the vertical crop keeps (your crosshair is centred, so 0 is usually right).</div>
     </div>
 
-    <h2 class="panel-title" style="margin-top:22px">Output quality</h2>
+    <h2 class="panel-title" style="margin-top:22px">Output</h2>
+
+    <div class="field-row">
+      <label>Resolution</label>
+      <select id="resSelect">
+        <option value="1280">720p — smallest file</option>
+        <option value="1920" selected>1080p — best for TikTok</option>
+        <option value="2560">1440p (2K)</option>
+        <option value="3840">2160p (4K) — heaviest</option>
+        <option value="0">Match source</option>
+      </select>
+    </div>
 
     <div class="field-row">
       <label>Quality</label>
       <select id="qualitySelect">
-        <option value="1280|5">Compact · 720p — smallest file</option>
-        <option value="1920|8">HD · 1080p — small &amp; sharp</option>
-        <option value="1920|16" selected>Full HD · 1080p — best for TikTok</option>
-        <option value="2560|24">Ultra HD · 2K (1440p)</option>
-        <option value="3840|40">Ultra HD · 4K (2160p) — heaviest</option>
-        <option value="0|20">Match source size</option>
+        <option value="0.060">Efficient — smallest, still decent</option>
+        <option value="0.090">Balanced</option>
+        <option value="0.130" selected>High — TikTok sweet spot</option>
+        <option value="0.190">Master — archive copy</option>
       </select>
     </div>
+
+    <div class="field-row">
+      <label>Codec</label>
+      <select id="codecSelect">
+        <option value="h264" selected>H.264 — plays everywhere</option>
+        <option value="hevc">H.265 / HEVC — same look, smaller</option>
+      </select>
+    </div>
+
     <div class="ctrl-note" id="qualityNote"></div>
 
     <label class="compare-toggle" style="margin-top:14px">
@@ -171,7 +150,7 @@
 <main class="info-layout tab-panel" id="tab-analyse" hidden>
   <div class="info-card">
     <h3>Analyse a clip's look</h3>
-    <div class="sub">Drop a clip to read its brightness, contrast, saturation, warmth and sharpness.</div>
+    <div class="sub">Drop a clip to read its brightness, contrast, saturation, warmth, sharpness — plus how much noise and compression blocking it's carrying.</div>
 
     <div class="drop-zone" id="anDrop">
       <input type="file" id="anFile" accept="video/*" hidden>
@@ -183,7 +162,6 @@
     </div>
 
     <div id="anBusy" class="export-status busy" hidden></div>
-    <canvas id="anCanvas" hidden></canvas>
 
     <div id="anResults" hidden>
       <div class="an-summary" id="anSummary"></div>
@@ -197,7 +175,7 @@
 
     <div class="callout" style="margin-top:16px">
       <b>What this is:</b> it measures the clip's <i>current</i> look — its real brightness, contrast, saturation,
-      warmth and sharpness. It <b>can't</b> read the exact CapCut slider numbers someone used (a finished video
+      warmth, sharpness, noise and blocking. It <b>can't</b> read the exact CapCut slider numbers someone used (a finished video
       doesn't store those), but these readings tell you the look so you can recreate it on your own clip in the
       <b>Enhance</b> tab.
     </div>
@@ -211,6 +189,6 @@
 <main class="info-layout tab-panel" id="tab-tiktok" hidden></main>
 
 <script src="mp4-muxer.min.js?v=1"></script>
-<script src="enhance.js?v=9"></script>
+<script src="enhance.js?v=10"></script>
 </body>
 </html>

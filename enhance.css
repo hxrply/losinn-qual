@@ -140,6 +140,13 @@ html, body { max-width: 100%; overflow-x: hidden; }
 }
 .compare-toggle input { accent-color: var(--accent); }
 .stage-meta { font-family: var(--mono); font-size: 11.5px; color: var(--dim); }
+.stage-meta.pipeline {
+  font-size: 11px;
+  color: var(--accent-2);
+  opacity: 0.75;
+  margin-top: -6px;
+  word-break: break-word;
+}
 
 /* ── Trim ── */
 .trim-bar {
@@ -171,6 +178,33 @@ html, body { max-width: 100%; overflow-x: hidden; }
   color: var(--accent-ink); border-color: transparent;
   box-shadow: 0 4px 12px rgba(143,107,255,0.35);
 }
+
+/* ── Auto-enhance ── */
+.btn-auto { width: 100%; padding: 13px; font-size: 14px; }
+.auto-note {
+  font-family: var(--sans); font-size: 11px; color: var(--dim);
+  line-height: 1.45; margin: 7px 2px 14px;
+}
+.auto-note b { color: var(--accent-2); font-family: var(--mono); }
+
+/* ── Advanced (folded-away) controls ── */
+details.adv {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--panel-2);
+  padding: 0 12px;
+  margin-bottom: 4px;
+}
+details.adv > summary {
+  font-family: var(--mono); font-size: 11.5px; color: var(--dim);
+  padding: 10px 2px; cursor: pointer; list-style: none;
+  text-transform: uppercase; letter-spacing: 0.06em;
+}
+details.adv > summary::-webkit-details-marker { display: none; }
+details.adv > summary::before { content: "▸ "; color: var(--accent); }
+details.adv[open] > summary::before { content: "▾ "; }
+details.adv[open] > summary { border-bottom: 1px solid var(--border); margin-bottom: 14px; }
+details.adv .ctrl:last-child { margin-bottom: 12px; }
 
 /* ── Profiles ── */
 .profiles {
