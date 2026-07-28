@@ -74,7 +74,9 @@ float hash21(vec2 p) {
 /* ── Pass 1: RESTORE — undo compression damage at source resolution ── */
 const FRAG_RESTORE = HEAD + `
 uniform sampler2D uTex;
+uniform sampler2D uHist;   // previous restored frame
 uniform vec2  uTexel;      // 1 / source size
+uniform vec2  uHTexel;     // 1 / history (restore target) size
 uniform vec2  uSrcSize;    // source pixels
 uniform vec2  uUvScale;    // crop / 9:16 reframe
 uniform vec2  uUvOffset;
@@ -82,6 +84,8 @@ uniform float uDeblock;
 uniform float uDenoise;
 uniform float uChroma;
 uniform float uDeband;
+uniform float uTemporal;
+uniform float uHistOk;     // 1 when the previous frame is genuinely the one before
 uniform float uSeed;
 
 /* One bilateral tap: spatial weight times a range weight, so a neighbour only
@@ -169,6 +173,52 @@ void main() {
     acc += texture2D(uTex, uv + uTexel * vec2(-r, -r)).rgb;
     vec3 blur = acc / 9.0;
     col = mix(col, vec3(lum(col)) + (blur - vec3(lum(blur))), uChroma);
+  }
+
+  // ── temporal denoise ──
+  // The one thing a single-frame filter can never do. Sensor/encoder noise is
+  // different on every frame but the scene mostly isn't, so averaging in the
+  // previous restored frame cancels the noise anywhere the picture held still —
+  // walls, floors, sky — while costing no detail at all there.
+  //
+  // The history is first clamped into the range of this frame's own
+  // neighbourhood. That is what stops moving things from smearing: if an
+  // operator has walked across this pixel, the old colour lies outside the new
+  // local range, gets clamped to it, and contributes nothing. The extra
+  // brightness test then backs the blend off on whatever survives that.
+  if (uTemporal > 0.001 && uHistOk > 0.5) {
+    // The history is a texture this pass rendered last time, so it is stored in
+    // framebuffer orientation. vUv is flipped for sampling the source video, so
+    // reading the history with it would pair each pixel with the one mirrored
+    // across the frame. Undo the flip to line them up.
+    vec2 huv = vec2(vUv.x, 1.0 - vUv.y);
+    vec3 hist = texture2D(uHist, huv).rgb;
+
+    // Decide "has this moved?" from a blurred comparison, never from the raw
+    // per-pixel difference — that difference *is* the noise being removed, so
+    // gating on it switches the filter off exactly where it's needed. Averaging
+    // both sides first leaves only genuine change behind.
+    vec3 cAvg = (col
+      + texture2D(uTex, uv + uTexel * vec2( 1.0,  0.0)).rgb
+      + texture2D(uTex, uv + uTexel * vec2(-1.0,  0.0)).rgb
+      + texture2D(uTex, uv + uTexel * vec2( 0.0,  1.0)).rgb
+      + texture2D(uTex, uv + uTexel * vec2( 0.0, -1.0)).rgb) * 0.2;
+    vec3 hAvg = (hist
+      + texture2D(uHist, huv + uHTexel * vec2( 1.0,  0.0)).rgb
+      + texture2D(uHist, huv + uHTexel * vec2(-1.0,  0.0)).rgb
+      + texture2D(uHist, huv + uHTexel * vec2( 0.0,  1.0)).rgb
+      + texture2D(uHist, huv + uHTexel * vec2( 0.0, -1.0)).rgb) * 0.2;
+
+    // Thresholds sit either side of the gap between the two things this has to
+    // tell apart. Leftover noise in the blurred difference lands around 2%, so
+    // anything under that blends at full strength; a moving operator against a
+    // wall moves the blurred value by 10% or more, so by 12% the history is
+    // rejected outright. The history is always cleaner than the incoming frame,
+    // so this difference never settles to zero — tuning it too tight quietly
+    // throttles the filter to nothing.
+    float d = max(abs(lum(cAvg) - lum(hAvg)), length(cAvg - hAvg) * 0.6);
+    float w = uTemporal * 0.9 * (1.0 - smoothstep(0.025, 0.12, d));
+    col = mix(col, hist, w);
   }
 
   // ── deband ──
@@ -410,18 +460,29 @@ void main() {
   if (uClarity > 0.001) {
     float r = uRadius;
     float rd = r * 0.7071;
-    float lb = lum(texture2D(uTex, vUv + vec2(  r,  0.0) * uTexel).rgb)
-             + lum(texture2D(uTex, vUv + vec2( -r,  0.0) * uTexel).rgb)
-             + lum(texture2D(uTex, vUv + vec2( 0.0,   r) * uTexel).rgb)
-             + lum(texture2D(uTex, vUv + vec2( 0.0,  -r) * uTexel).rgb)
-             + lum(texture2D(uTex, vUv + vec2( rd,  rd) * uTexel).rgb)
-             + lum(texture2D(uTex, vUv + vec2(-rd,  rd) * uTexel).rgb)
-             + lum(texture2D(uTex, vUv + vec2( rd, -rd) * uTexel).rgb)
-             + lum(texture2D(uTex, vUv + vec2(-rd, -rd) * uTexel).rgb);
-    lb /= 8.0;
+    // Narrow band: texture and surface grain.
+    float lb1 = lum(texture2D(uTex, vUv + vec2(  r,  0.0) * uTexel).rgb)
+              + lum(texture2D(uTex, vUv + vec2( -r,  0.0) * uTexel).rgb)
+              + lum(texture2D(uTex, vUv + vec2( 0.0,   r) * uTexel).rgb)
+              + lum(texture2D(uTex, vUv + vec2( 0.0,  -r) * uTexel).rgb)
+              + lum(texture2D(uTex, vUv + vec2( rd,  rd) * uTexel).rgb)
+              + lum(texture2D(uTex, vUv + vec2(-rd,  rd) * uTexel).rgb)
+              + lum(texture2D(uTex, vUv + vec2( rd, -rd) * uTexel).rgb)
+              + lum(texture2D(uTex, vUv + vec2(-rd, -rd) * uTexel).rgb);
+    lb1 /= 8.0;
+    // Wide band: the shape of whole objects. Lifting two scales at once reads as
+    // depth; pushing a single scale hard is exactly what looks like a halo.
+    float w = r * 2.6;
+    float lb2 = lum(texture2D(uTex, vUv + vec2(  w,  0.0) * uTexel).rgb)
+              + lum(texture2D(uTex, vUv + vec2( -w,  0.0) * uTexel).rgb)
+              + lum(texture2D(uTex, vUv + vec2( 0.0,   w) * uTexel).rgb)
+              + lum(texture2D(uTex, vUv + vec2( 0.0,  -w) * uTexel).rgb);
+    lb2 /= 4.0;
     float lc = lum(col);
-    float det = lc - lb;
-    det = det / (1.0 + abs(det) * 3.0);
+    float d1 = lc - lb1;
+    float d2 = lc - lb2;
+    float det = d1 * 0.68 + d2 * 0.32;
+    det = det / (1.0 + abs(det) * 3.0);         // soft limit: no rims on hard edges
     float nl = clamp(lc + det * uClarity * 2.2, 0.0, 1.0);
     col *= (lc > 0.002) ? (nl / lc) : 1.0;      // scale RGB together to hold hue
   }
@@ -542,7 +603,10 @@ function sizeTarget(t, w, h) {
   }
   return t;
 }
-const tgtClean = makeTarget();
+// Two restore targets, ping-ponged: temporal denoise reads the previous frame's
+// result while writing this frame's.
+let tgtClean = makeTarget();
+let tgtPrev = makeTarget();
 const tgtScaled = makeTarget();
 
 function drawTo(target, w, h) {
@@ -560,8 +624,17 @@ let cleanW = 0, cleanH = 0;      // restore-pass size = cropped source size
 let srcFps = 60;
 let seed = 0;
 
+/* Temporal denoise is only valid between genuinely consecutive frames. Scrubbing,
+ * reframing or changing resolution all make the stored frame meaningless, so the
+ * geometry epoch invalidates it and the time delta rejects anything that isn't
+ * the next frame along. */
+let histEpoch = 0;
+let histTime = -1;
+let histAtEpoch = -1;
+function invalidateHistory() { histEpoch++; histTime = -1; }
+
 const params = {
-  deblock: 0.45, denoise: 0.20, chroma: 0.35, deband: 0.30,
+  deblock: 0.45, denoise: 0.20, chroma: 0.35, deband: 0.30, temporal: 0.40,
   sharp: 0.55, clarity: 0.28,
   sat: 1.12, vib: 0.28, temp: 0.00,
   contrast: 1.12, bright: -0.02, black: 0.05, highlight: 0.25, grain: 0.00,
@@ -582,6 +655,8 @@ const CONTROLS = [
     note: 'Video stores colour at quarter resolution, so blotchy reds and smeared blues appear first. Cleans colour only — luma detail is untouched.' },
   { g: 'Restore', k: 'deband', label: 'Deband', min: 0, max: 1, step: 0.01, pct: true,
     note: 'Removes the stair-steps in smoke, skyboxes and muzzle glow. Worth having on before you add contrast, which makes banding worse.' },
+  { g: 'Restore', k: 'temporal', label: 'Temporal denoise', min: 0, max: 1, step: 0.01, pct: true,
+    note: 'Cleans using the previous frame as well as this one. Noise changes every frame but walls don\'t, so it cancels out with no loss of detail — the one thing a single-frame filter can\'t do. Anything that moved is rejected, so it won\'t smear.' },
 
   { g: 'Detail', k: 'sharp', label: 'Sharpness', min: 0, max: 1, step: 0.01, pct: true,
     note: 'Contrast-adaptive (FidelityFX RCAS) — it works out its own limit per pixel, so it can go hard without white rims on edges.' },
@@ -613,12 +688,12 @@ const CONTROLS = [
 // rather than adding brightness, then boost vibrance so colours pop after
 // TikTok re-compresses the upload.
 const PRESETS = {
-  'R6 · 65 bright': { deblock: 0.45, denoise: 0.20, chroma: 0.35, deband: 0.30, sharp: 0.55, clarity: 0.28, sat: 1.12, vib: 0.28, temp: 0.00, contrast: 1.12, bright: -0.02, black: 0.05, highlight: 0.25, grain: 0.00 },
-  'HD restore':     { deblock: 0.70, denoise: 0.35, chroma: 0.55, deband: 0.45, sharp: 0.62, clarity: 0.35, sat: 1.10, vib: 0.30, temp: 0.00, contrast: 1.08, bright: 0.00,  black: 0.03, highlight: 0.30, grain: 0.04 },
-  'Punchy':         { deblock: 0.40, denoise: 0.15, chroma: 0.30, deband: 0.25, sharp: 0.72, clarity: 0.42, sat: 1.26, vib: 0.36, temp: 0.05, contrast: 1.20, bright: -0.03, black: 0.07, highlight: 0.35, grain: 0.00 },
-  'Clean / soft':   { deblock: 0.55, denoise: 0.45, chroma: 0.60, deband: 0.40, sharp: 0.30, clarity: 0.15, sat: 1.05, vib: 0.16, temp: 0.00, contrast: 1.04, bright: 0.00,  black: 0.02, highlight: 0.20, grain: 0.00 },
-  'Max detail':     { deblock: 0.30, denoise: 0.10, chroma: 0.20, deband: 0.20, sharp: 0.88, clarity: 0.50, sat: 1.14, vib: 0.30, temp: 0.00, contrast: 1.12, bright: -0.02, black: 0.05, highlight: 0.25, grain: 0.00 },
-  'Off':            { deblock: 0, denoise: 0, chroma: 0, deband: 0, sharp: 0, clarity: 0, sat: 1, vib: 0, temp: 0, contrast: 1, bright: 0, black: 0, highlight: 0, grain: 0 },
+  'R6 · 65 bright': { deblock: 0.45, denoise: 0.20, chroma: 0.35, deband: 0.30, temporal: 0.40, sharp: 0.55, clarity: 0.28, sat: 1.12, vib: 0.28, temp: 0.00, contrast: 1.12, bright: -0.02, black: 0.05, highlight: 0.25, grain: 0.00 },
+  'HD restore':     { deblock: 0.70, denoise: 0.35, chroma: 0.55, deband: 0.45, temporal: 0.60, sharp: 0.62, clarity: 0.35, sat: 1.10, vib: 0.30, temp: 0.00, contrast: 1.08, bright: 0.00,  black: 0.03, highlight: 0.30, grain: 0.04 },
+  'Punchy':         { deblock: 0.40, denoise: 0.15, chroma: 0.30, deband: 0.25, temporal: 0.35, sharp: 0.72, clarity: 0.42, sat: 1.26, vib: 0.36, temp: 0.05, contrast: 1.20, bright: -0.03, black: 0.07, highlight: 0.35, grain: 0.00 },
+  'Clean / soft':   { deblock: 0.55, denoise: 0.45, chroma: 0.60, deband: 0.40, temporal: 0.70, sharp: 0.30, clarity: 0.15, sat: 1.05, vib: 0.16, temp: 0.00, contrast: 1.04, bright: 0.00,  black: 0.02, highlight: 0.20, grain: 0.00 },
+  'Max detail':     { deblock: 0.30, denoise: 0.10, chroma: 0.20, deband: 0.20, temporal: 0.30, sharp: 0.88, clarity: 0.50, sat: 1.14, vib: 0.30, temp: 0.00, contrast: 1.12, bright: -0.02, black: 0.05, highlight: 0.25, grain: 0.00 },
+  'Off':            { deblock: 0, denoise: 0, chroma: 0, deband: 0, temporal: 0, sharp: 0, clarity: 0, sat: 1, vib: 0, temp: 0, contrast: 1, bright: 0, black: 0, highlight: 0, grain: 0 },
 };
 
 /* Remember the user's settings between visits. */
@@ -714,7 +789,7 @@ const round2 = (v) => +v.toFixed(2);
  * the Auto-enhance button. Restore settings come from the clip's measured
  * damage; tone and colour come from how far its look sits from a good target. */
 function lookToParams(look) {
-  const { B, C, S, Sh, warm, noise, block } = look;
+  const { B, C, S, Sh, warm, noise, block, blackFloor } = look;
   const deblock = clamp(block * 2.2, 0, 0.9);
   const denoise = clamp((noise - 2.0) / 12.0, 0, 0.75);
   return {
@@ -722,6 +797,9 @@ function lookToParams(look) {
     denoise: round2(denoise),
     chroma: round2(clamp(denoise * 0.8 + deblock * 0.55 + 0.12, 0, 0.9)),
     deband: round2(clamp(0.45 - noise / 18, 0.12, 0.55)),
+    // Temporal cleaning is nearly free on detail, so lean on it more than the
+    // spatial filters whenever the clip is actually noisy.
+    temporal: round2(clamp(0.25 + (noise - 1.0) / 10, 0.2, 0.75)),
     sharp: round2(clamp(0.9 - Sh / 90, 0.15, 0.9)),
     clarity: round2(clamp(0.55 - C / 180, 0.08, 0.5)),
     sat: round2(clamp(1 + (34 - S) / 90, 0.85, 1.45)),
@@ -729,7 +807,8 @@ function lookToParams(look) {
     temp: round2(clamp(-warm / 45, -0.5, 0.5)),
     contrast: round2(clamp(1 + (46 - C) / 90, 0.95, 1.35)),
     bright: round2(clamp((52 - B) / 90, -0.25, 0.25)),
-    black: +clamp((52 - C) / 400 + 0.02, 0, 0.11).toFixed(3),
+    // Measured directly off the histogram rather than guessed from contrast.
+    black: +clamp(blackFloor / 255 * 0.85, 0, 0.15).toFixed(3),
     highlight: round2(clamp(B / 260 + 0.12, 0.1, 0.45)),
     grain: params.grain,
   };
@@ -780,14 +859,29 @@ function render() {
   const W = canvas.width, H = canvas.height;
   if (!W || !H || !cleanW || !cleanH) return;
 
+  // Only blend with the stored frame when it really is the one immediately
+  // before this one, in the same geometry. A re-render of the same timestamp
+  // (dragging a slider on a paused clip) is allowed through: the history holds
+  // that same frame, so the blend is a no-op and the preview stays honest.
+  const now = video.currentTime;
+  const dt = now - histTime;
+  const frameGap = 3.5 / (srcFps || 60);
+  const histOk = histAtEpoch === histEpoch && histTime >= 0 && dt >= 0 && dt < frameGap;
+  const advance = dt > 1e-6;
+
   // ── pass 1: restore, at source resolution (and cropped to the output shape,
   //    so a 9:16 crop doesn't waste work on pixels that get thrown away) ──
   sizeTarget(tgtClean, cleanW, cleanH);
+  sizeTarget(tgtPrev, cleanW, cleanH);
   gl.useProgram(P_RESTORE.p);
   gl.activeTexture(gl.TEXTURE0);
   gl.bindTexture(gl.TEXTURE_2D, srcTex);
   gl.uniform1i(P_RESTORE.u.uTex, 0);
+  gl.activeTexture(gl.TEXTURE1);
+  gl.bindTexture(gl.TEXTURE_2D, tgtPrev.tex);
+  gl.uniform1i(P_RESTORE.u.uHist, 1);
   gl.uniform2f(P_RESTORE.u.uTexel, 1 / video.videoWidth, 1 / video.videoHeight);
+  gl.uniform2f(P_RESTORE.u.uHTexel, 1 / cleanW, 1 / cleanH);
   gl.uniform2f(P_RESTORE.u.uSrcSize, video.videoWidth, video.videoHeight);
   gl.uniform2f(P_RESTORE.u.uUvScale, crop.sx, crop.sy);
   gl.uniform2f(P_RESTORE.u.uUvOffset, crop.ox, crop.oy);
@@ -795,6 +889,8 @@ function render() {
   gl.uniform1f(P_RESTORE.u.uDenoise, params.denoise);
   gl.uniform1f(P_RESTORE.u.uChroma, params.chroma);
   gl.uniform1f(P_RESTORE.u.uDeband, params.deband);
+  gl.uniform1f(P_RESTORE.u.uTemporal, params.temporal);
+  gl.uniform1f(P_RESTORE.u.uHistOk, histOk ? 1 : 0);
   gl.uniform1f(P_RESTORE.u.uSeed, seed);
   drawTo(tgtClean, cleanW, cleanH);
 
@@ -843,6 +939,15 @@ function render() {
   drawTo(null, W, H);
 
   gl.activeTexture(gl.TEXTURE0);
+
+  // Retire this frame into the history slot, but only once the clip has really
+  // moved on. Re-rendering the same timestamp must not blend a frame into
+  // itself repeatedly, or a paused preview would creep steadily softer.
+  if (advance) {
+    const swap = tgtClean; tgtClean = tgtPrev; tgtPrev = swap;
+    histTime = now;
+    histAtEpoch = histEpoch;
+  }
 }
 
 function loop() {
@@ -891,6 +996,7 @@ function computeOutSize() {
   computeCrop(srcA, outA);
   cleanW = Math.max(2, Math.round(vw * crop.sx));
   cleanH = Math.max(2, Math.round(vh * crop.sy));
+  invalidateHistory();   // stored frame no longer lines up with this geometry
 
   setRenderSize(viewW, viewH);
   updateMeta();
@@ -970,6 +1076,7 @@ function updatePipelineMeta() {
   if (params.denoise > 0.01) on.push('denoise');
   if (params.chroma > 0.01) on.push('chroma');
   if (params.deband > 0.01) on.push('deband');
+  if (params.temporal > 0.01) on.push('temporal');
   const outLong = Math.max(outW, outH);
   const srcLong = Math.max(cleanW, cleanH);
   if (outLong > srcLong) on.push('EASU upscale');
@@ -1338,7 +1445,8 @@ document.getElementById('autoBtn').addEventListener('click', async () => {
     const look = await measureLook(video, (p) => { btn.textContent = `✦ Reading clip… ${p}%`; });
     applyParams(lookToParams(look));
     noteEl.innerHTML = `Measured: <b>${look.noise.toFixed(1)}</b> noise, <b>${Math.round(look.block * 100)}%</b> blocking, ` +
-      `<b>${Math.round(look.C)}</b>/100 contrast, <b>${Math.round(look.S)}</b>/100 colour, <b>${Math.round(look.Sh)}</b>/100 sharpness. Sliders set to match.`;
+      `black floor at <b>${look.blackFloor}</b>/255, <b>${Math.round(look.C)}</b>/100 contrast, ` +
+      `<b>${Math.round(look.S)}</b>/100 colour, <b>${Math.round(look.Sh)}</b>/100 sharpness. Sliders set to match.`;
   } catch (e) {
     noteEl.textContent = 'Could not read this clip — set the sliders by hand, or try a preset.';
   }
@@ -1382,6 +1490,7 @@ async function measureLook(vid, onProgress) {
   let count = 0, sumL = 0, sumL2 = 0, sumS = 0, sumR = 0, sumB = 0;
   let sumEdge = 0, frames = 0, sumNoise = 0, noiseN = 0;
   let onGrid = 0, onGridN = 0, offGrid = 0, offGridN = 0;
+  const histo = new Float64Array(256);
 
   try { vid.pause(); } catch (_) {}
 
@@ -1400,6 +1509,7 @@ async function measureLook(vid, onProgress) {
       const r = img[p], g = img[p + 1], b = img[p + 2];
       const l = 0.2126 * r + 0.7152 * g + 0.0722 * b;
       luma[q] = l;
+      histo[l < 0 ? 0 : (l > 255 ? 255 : l | 0)]++;
       sumL += l; sumL2 += l * l;
       const mx = Math.max(r, g, b), mn = Math.min(r, g, b);
       sumS += mx > 0 ? (mx - mn) / mx : 0;
@@ -1448,6 +1558,18 @@ async function measureLook(vid, onProgress) {
   const offM = offGridN ? offGrid / offGridN : 0;
   const block = offM > 0.01 ? clamp(onM / offM - 1, 0, 1.5) : 0;
 
+  // Where the darkest and brightest half-percent of the picture actually sit.
+  // The black floor is the direct measurement of this app's whole reason for
+  // existing: at 65 in-game brightness R6 never reaches 0, so the shadows sit
+  // at some raised value and the clip looks washed. Reading it beats inferring
+  // it from average contrast, which is what the old mapping did.
+  const pctl = (frac) => {
+    const target = count * frac;
+    let acc = 0;
+    for (let i = 0; i < 256; i++) { acc += histo[i]; if (acc >= target) return i; }
+    return 255;
+  };
+
   return {
     B: meanL / 255 * 100,
     C: Math.min(100, stdL / 70 * 100),
@@ -1456,6 +1578,8 @@ async function measureLook(vid, onProgress) {
     warm: (sumR - sumB) / count,
     noise,
     block,
+    blackFloor: pctl(0.005),
+    whiteCeil: pctl(0.995),
   };
 }
 
@@ -1750,6 +1874,7 @@ async function webcodecsExport() {
 
   video.muted = true;
   video.pause();
+  invalidateHistory();   // start the temporal chain fresh at the trim point
 
   const pb = document.getElementById('pbar');
   const pd = document.getElementById('pdet');
@@ -2091,9 +2216,11 @@ document.getElementById('tab-tiktok').innerHTML = `
 
   function renderMetrics(m) {
     lastLook = m;
-    const { B, C, S, Sh, warm, noise, block } = m;
+    const { B, C, S, Sh, warm, noise, block, blackFloor } = m;
     const noisePct = Math.min(100, noise / 14 * 100);
     const blockPct = Math.min(100, block * 100);
+    const floorPct = Math.min(100, blackFloor / 60 * 100);
+    const fW = pick(blackFloor, [[6, 'True black'], [14, 'Slightly lifted'], [26, 'Lifted'], [999, 'Badly washed']]);
 
     const bW = pick(B, [[30, 'Dark'], [42, 'Dim'], [58, 'Balanced'], [72, 'Bright'], [101, 'Very bright']]);
     const cW = pick(C, [[30, 'Flat'], [45, 'Medium'], [64, 'Punchy'], [101, 'Very punchy']]);
@@ -2120,6 +2247,7 @@ document.getElementById('tab-tiktok').innerHTML = `
       centreBar('Warmth', warmLabel, warm >= 0 ? 50 : 50 - warmHalf, warmHalf, 'Cool (blue) ← → warm (orange).'),
       bar('Noise', Math.round(noisePct) + ' / 100', noisePct, `${nW} — grain and fizz left by the encoder. Drives the Denoise slider.`),
       bar('Blocking', Math.round(blockPct) + ' / 100', blockPct, `${kW} — 8×8 compression squares. Drives the Deblock slider.`),
+      bar('Black floor', blackFloor + ' / 255', floorPct, `${fW} — how far off true black the darkest shadows sit. High in-game brightness is what lifts it. Drives the Deepen blacks slider.`),
     ].join('');
   }
 

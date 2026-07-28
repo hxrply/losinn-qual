@@ -21,7 +21,7 @@ Sharpening a blocky frame just gives you crisp blocks, so the artefacts come off
 *first*, before anything magnifies them.
 
 1. **Restore** (at source resolution) — deblock, edge-aware denoise, chroma
-   clean-up, deband.
+   clean-up, deband, and **temporal denoise**.
 2. **Resample** — AMD FidelityFX **EASU** (edge-adaptive spatial upsampling) when
    enlarging, a windowed area filter when shrinking. Both beat the browser's
    built-in bilinear by a wide margin on diagonals, fences and fine text.
@@ -30,6 +30,23 @@ Sharpening a blocky frame just gives you crisp blocks, so the artefacts come off
    white balance in linear light, an endpoint-preserving S-curve for contrast,
    highlight rolloff, saturation/vibrance, optional grain, and triangular dither
    so 8-bit output doesn't band.
+
+### Temporal denoise
+
+The one thing no single-frame filter can do, and the biggest single quality lever
+here. Noise is different on every frame but the scene mostly isn't, so averaging
+in the previous restored frame cancels the noise anywhere the picture held still
+— walls, floor, sky — at no cost in detail, because nothing there changed.
+
+Anything that moved has to be rejected or it smears. The test for "did this
+move?" runs on a **blurred** comparison of the two frames, never the raw
+per-pixel difference: that difference *is* the noise being removed, so gating on
+it would switch the filter off exactly where it's needed.
+
+Measured on a synthetic clip with a static noisy patch and a bar crossing the
+frame at 20px per frame: **43.8% less noise, with zero smearing** — the moving
+bar's edge profile is identical with the filter on and off, and the largest
+deviation anywhere behind it is 1 unit out of 277.
 
 **Not neural super-resolution (Topaz/Wink).** Nothing here invents detail that
 isn't in the source. What it does is remove the artefacts that make a console
@@ -41,8 +58,12 @@ player uses — which covers most of the gap, and runs in real time on a weak GP
 The **✦ Auto-enhance** button measures the clip and sets every slider from what
 it actually needs. Tone and colour come from a downscaled copy; noise and
 compression blocking are measured on a **native-resolution** crop, because
-downscaling destroys the 8×8 grid and the grain those two need to see. It shows
-you the readings it used, so it isn't a black box.
+downscaling destroys the 8×8 grid and the grain those two need to see. The
+**black floor** — how far off true black the darkest half-percent of the picture
+sits — is read straight off a luma histogram, which is the direct measurement of
+the problem this app exists for: at 65 in-game brightness R6 never reaches 0, so
+the shadows sit raised and the clip looks washed. It shows you every reading it
+used, so it isn't a black box.
 
 ## Run it
 
@@ -66,12 +87,12 @@ limited).
 
 ## Tabs
 
-- **Enhance** — auto-enhance, presets, saved profiles, 14 sliders grouped into
+- **Enhance** — auto-enhance, presets, saved profiles, 15 sliders grouped into
   Restore / Detail / Colour / Tone / Finish, **trim (set start / end)**, 9:16
   reframing, resolution + quality + codec.
 - **Analyse** — measures any clip's brightness, contrast, saturation, warmth,
-  sharpness, **noise and blocking**, and can load those readings straight into
-  Enhance or save them as a profile.
+  sharpness, **noise, blocking and black floor**, and can load those readings
+  straight into Enhance or save them as a profile.
 - **CapCut Settings** — best export settings for Siege clips, plus the single
   highest-impact quality setting inside CapCut (the custom bitrate slider).
 - **TikTok Tips** — how to upload for the best quality and reach.
