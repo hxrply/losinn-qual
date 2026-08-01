@@ -109,7 +109,12 @@ void main() {
   // Kills mosquito noise around HUD edges and the grain Xbox capture leaves in
   // dark rooms, without the softening a mean filter costs you.
   if (uDenoise > 0.001) {
-    float sig = mix(0.020, 0.115, uDenoise);
+    // Compression noise lives in the shadows: the encoder spends almost nothing
+    // there, and R6 at high in-game brightness puts a lot of the picture in that
+    // range. Deepening blacks then stretches whatever is left. So lean harder on
+    // the dark end, where grain shows, and stay gentle in the highlights, where
+    // it doesn't and where detail matters.
+    float sig = mix(0.020, 0.115, uDenoise) * (1.0 + 1.6 * (1.0 - smoothstep(0.0, 0.35, l0)));
     float inv = 1.0 / (2.0 * sig * sig);
     vec3 acc = c0;
     float wsum = 1.0;
@@ -228,7 +233,11 @@ void main() {
   // ring is rotated per pixel so the fix never looks like a pattern itself.
   if (uDeband > 0.001) {
     float r = mix(4.0, 15.0, uDeband);
-    float a = hash21(gl_FragCoord.xy + uSeed) * 6.2831853;
+    // The sample ring is rotated per pixel to break up the pattern, but that
+    // rotation must NOT change from frame to frame. Re-rolling it every frame
+    // gave every flat area a slightly different average each time, and that
+    // shimmer reads as grain once the clip is playing.
+    float a = hash21(gl_FragCoord.xy) * 6.2831853;
     vec2 e1 = vec2(cos(a), sin(a)) * r;
     vec2 e2 = vec2(-e1.y, e1.x);
     vec3 s1 = texture2D(uTex, uv + uTexel * e1).rgb;
@@ -396,6 +405,7 @@ uniform vec2  uUvScale;
 uniform vec2  uUvOffset;
 uniform float uSharp;
 uniform float uClarity;
+uniform float uFloor;        // local contrast below this is noise, not detail
 uniform float uRadius;
 uniform float uSat;
 uniform float uVib;
@@ -445,7 +455,10 @@ void main() {
     vec3 hitMax = (vec3(1.0) - mx4) / min(4.0 * mn4 - 4.0, -1e-4);
     vec3 lobeRGB = max(-hitMin, hitMax);
     float lobe = max(-0.1875, min(max(lobeRGB.r, max(lobeRGB.g, lobeRGB.b)), 0.0));
-    lobe *= uSharp * 0.9 * nz;
+    // Coring. Without this the sharpener treats a 2% wobble left by the encoder
+    // exactly like a real edge, and enthusiastically turns it into grain. Below
+    // the noise floor there is nothing worth sharpening, so fade out entirely.
+    lobe *= uSharp * 0.9 * nz * smoothstep(uFloor * 0.35, uFloor, rng);
 
     vec3 sh = (lobe * (b + d + f + h) + e) / (4.0 * lobe + 1.0);
     vec3 lo = min(mn4, e);
@@ -482,6 +495,10 @@ void main() {
     float d1 = lc - lb1;
     float d2 = lc - lb2;
     float det = d1 * 0.68 + d2 * 0.32;
+    // Same idea as the sharpener's coring, gentler because a mid-radius
+    // difference is already far less noisy than a pixel-to-pixel one.
+    float knee = uFloor * 0.25;
+    det = sign(det) * max(0.0, abs(det) - knee);
     det = det / (1.0 + abs(det) * 3.0);         // soft limit: no rims on hard edges
     float nl = clamp(lc + det * uClarity * 2.2, 0.0, 1.0);
     col *= (lc > 0.002) ? (nl / lc) : 1.0;      // scale RGB together to hold hue
@@ -528,9 +545,11 @@ void main() {
   }
 
   // Triangular dither: one LSB of noise so the 8-bit output doesn't band where
-  // the grade stretched a gradient.
-  float d1 = hash21(gl_FragCoord.xy + uSeed + 11.7);
-  float d2 = hash21(gl_FragCoord.xy + uSeed + 23.3);
+  // the grade stretched a gradient. Fixed per pixel, not per frame — a static
+  // pattern this small is invisible, but re-rolling it every frame is moving
+  // noise, which both reads as grain and makes the encoder waste bits coding it.
+  float d1 = hash21(gl_FragCoord.xy + 11.7);
+  float d2 = hash21(gl_FragCoord.xy + 23.3);
   col += vec3((d1 + d2 - 1.0) / 255.0);
 
   gl_FragColor = vec4(clamp(col, 0.0, 1.0), 1.0);
@@ -634,8 +653,8 @@ let histAtEpoch = -1;
 function invalidateHistory() { histEpoch++; histTime = -1; }
 
 const params = {
-  deblock: 0.45, denoise: 0.20, chroma: 0.35, deband: 0.30, temporal: 0.40,
-  sharp: 0.55, clarity: 0.28,
+  deblock: 0.50, denoise: 0.32, chroma: 0.50, deband: 0.30, temporal: 0.55,
+  sharp: 0.48, clarity: 0.24, nfloor: 0.45,
   sat: 1.12, vib: 0.28, temp: 0.00,
   contrast: 1.12, bright: -0.02, black: 0.05, highlight: 0.25, grain: 0.00,
 };
@@ -662,6 +681,8 @@ const CONTROLS = [
     note: 'Contrast-adaptive (FidelityFX RCAS) — it works out its own limit per pixel, so it can go hard without white rims on edges.' },
   { g: 'Detail', k: 'clarity', label: 'Clarity', min: 0, max: 1, step: 0.01, pct: true,
     note: 'Local contrast. This is what actually reads as "HD" on a phone: texture in walls and smoke lifts without the whole clip getting harsh.' },
+  { g: 'Detail', k: 'nfloor', label: 'Noise floor', min: 0, max: 1, step: 0.01, pct: true,
+    note: 'How much local contrast counts as real detail. Anything fainter is left alone instead of being sharpened, which is what stops leftover compression noise turning into grain. Raise it if the result looks gritty; lower it if fine texture goes flat.' },
 
   { g: 'Colour', k: 'sat', label: 'Saturation', min: 0.4, max: 2, step: 0.01,
     note: 'Overall colour intensity.' },
@@ -688,16 +709,17 @@ const CONTROLS = [
 // rather than adding brightness, then boost vibrance so colours pop after
 // TikTok re-compresses the upload.
 const PRESETS = {
-  'R6 · 65 bright': { deblock: 0.45, denoise: 0.20, chroma: 0.35, deband: 0.30, temporal: 0.40, sharp: 0.55, clarity: 0.28, sat: 1.12, vib: 0.28, temp: 0.00, contrast: 1.12, bright: -0.02, black: 0.05, highlight: 0.25, grain: 0.00 },
-  'HD restore':     { deblock: 0.70, denoise: 0.35, chroma: 0.55, deband: 0.45, temporal: 0.60, sharp: 0.62, clarity: 0.35, sat: 1.10, vib: 0.30, temp: 0.00, contrast: 1.08, bright: 0.00,  black: 0.03, highlight: 0.30, grain: 0.04 },
-  'Punchy':         { deblock: 0.40, denoise: 0.15, chroma: 0.30, deband: 0.25, temporal: 0.35, sharp: 0.72, clarity: 0.42, sat: 1.26, vib: 0.36, temp: 0.05, contrast: 1.20, bright: -0.03, black: 0.07, highlight: 0.35, grain: 0.00 },
-  'Clean / soft':   { deblock: 0.55, denoise: 0.45, chroma: 0.60, deband: 0.40, temporal: 0.70, sharp: 0.30, clarity: 0.15, sat: 1.05, vib: 0.16, temp: 0.00, contrast: 1.04, bright: 0.00,  black: 0.02, highlight: 0.20, grain: 0.00 },
-  'Max detail':     { deblock: 0.30, denoise: 0.10, chroma: 0.20, deband: 0.20, temporal: 0.30, sharp: 0.88, clarity: 0.50, sat: 1.14, vib: 0.30, temp: 0.00, contrast: 1.12, bright: -0.02, black: 0.05, highlight: 0.25, grain: 0.00 },
-  'Off':            { deblock: 0, denoise: 0, chroma: 0, deband: 0, temporal: 0, sharp: 0, clarity: 0, sat: 1, vib: 0, temp: 0, contrast: 1, bright: 0, black: 0, highlight: 0, grain: 0 },
+  'R6 · 65 bright': { deblock: 0.50, denoise: 0.32, chroma: 0.50, deband: 0.30, temporal: 0.55, sharp: 0.48, clarity: 0.24, nfloor: 0.45, sat: 1.12, vib: 0.28, temp: 0.00, contrast: 1.12, bright: -0.02, black: 0.05, highlight: 0.25, grain: 0.00 },
+  'Polished':       { deblock: 0.65, denoise: 0.48, chroma: 0.70, deband: 0.40, temporal: 0.70, sharp: 0.42, clarity: 0.20, nfloor: 0.65, sat: 1.10, vib: 0.26, temp: 0.00, contrast: 1.10, bright: -0.01, black: 0.04, highlight: 0.28, grain: 0.00 },
+  'HD restore':     { deblock: 0.70, denoise: 0.42, chroma: 0.62, deband: 0.45, temporal: 0.65, sharp: 0.55, clarity: 0.30, nfloor: 0.55, sat: 1.10, vib: 0.30, temp: 0.00, contrast: 1.08, bright: 0.00,  black: 0.03, highlight: 0.30, grain: 0.00 },
+  'Punchy':         { deblock: 0.45, denoise: 0.25, chroma: 0.42, deband: 0.25, temporal: 0.45, sharp: 0.66, clarity: 0.38, nfloor: 0.38, sat: 1.26, vib: 0.36, temp: 0.05, contrast: 1.20, bright: -0.03, black: 0.07, highlight: 0.35, grain: 0.00 },
+  'Clean / soft':   { deblock: 0.55, denoise: 0.55, chroma: 0.72, deband: 0.40, temporal: 0.75, sharp: 0.28, clarity: 0.12, nfloor: 0.70, sat: 1.05, vib: 0.16, temp: 0.00, contrast: 1.04, bright: 0.00,  black: 0.02, highlight: 0.20, grain: 0.00 },
+  'Max detail':     { deblock: 0.35, denoise: 0.15, chroma: 0.28, deband: 0.20, temporal: 0.35, sharp: 0.85, clarity: 0.48, nfloor: 0.18, sat: 1.14, vib: 0.30, temp: 0.00, contrast: 1.12, bright: -0.02, black: 0.05, highlight: 0.25, grain: 0.00 },
+  'Off':            { deblock: 0, denoise: 0, chroma: 0, deband: 0, temporal: 0, sharp: 0, clarity: 0, nfloor: 0, sat: 1, vib: 0, temp: 0, contrast: 1, bright: 0, black: 0, highlight: 0, grain: 0 },
 };
 
 /* Remember the user's settings between visits. */
-const LS_KEY = 'losinnqual.settings.v2';
+const LS_KEY = 'losinnqual.settings.v3';
 function saveSettings() {
   try {
     localStorage.setItem(LS_KEY, JSON.stringify({
@@ -713,8 +735,29 @@ function saveSettings() {
 function loadSettings() {
   let s;
   try { s = JSON.parse(localStorage.getItem(LS_KEY) || 'null'); } catch (_) { return; }
-  if (!s) { migrateV1(); return; }
+  if (!s) { migrateOlder(); return; }
   if (s.params) Object.assign(params, s.params);
+  applyOutputSettings(s);
+}
+
+/* Settings saved by an older build hold a look that was tuned before the
+ * sharpener learned to leave noise alone, and silently restoring it would hide
+ * the fix behind the user's own stale numbers. Keep the output choices — those
+ * still mean what they meant — and let the look come from the current defaults.
+ * Saved profiles are stored separately and are untouched. */
+function migrateOlder() {
+  let s = null;
+  for (const k of ['losinnqual.settings.v2', 'losinnqual.settings.v1']) {
+    try { s = JSON.parse(localStorage.getItem(k) || 'null'); } catch (_) { s = null; }
+    if (s) break;
+  }
+  if (!s) return;
+  // v1 packed resolution and bitrate into one "1920|16" string.
+  if (typeof s.quality === 'string' && s.quality.indexOf('|') > 0) s.res = s.quality.split('|')[0];
+  applyOutputSettings(s);
+}
+
+function applyOutputSettings(s) {
   setSelect('resSelect', s.res);
   setSelect('qualitySelect', s.quality);
   setSelect('codecSelect', s.codec);
@@ -734,25 +777,6 @@ function setSelect(id, val) {
   const el = document.getElementById(id);
   if (val && [...el.options].some(o => o.value === val)) el.value = val;
 }
-// The old build stored resolution and bitrate as one "1920|16" string and had
-// no restore stage; carry across what still means the same thing.
-function migrateV1() {
-  let s;
-  try { s = JSON.parse(localStorage.getItem('losinnqual.settings.v1') || 'null'); } catch (_) { return; }
-  if (!s) return;
-  if (s.params) {
-    for (const k of ['sharp', 'sat', 'vib', 'contrast', 'black'])
-      if (typeof s.params[k] === 'number') params[k] = s.params[k];
-  }
-  if (typeof s.quality === 'string') setSelect('resSelect', s.quality.split('|')[0]);
-  if (s.aspect) {
-    aspect = s.aspect;
-    document.getElementById('aspectSelect').value = aspect;
-    document.getElementById('reframeCtrl').hidden = aspect === 'source';
-  }
-  if (s.mute) document.getElementById('muteChk').checked = true;
-}
-
 /* ── Profiles: user-saved looks (separate from the built-in presets) ── */
 const PROF_KEY = 'losinnqual.profiles.v1';
 function getProfiles() { try { return JSON.parse(localStorage.getItem(PROF_KEY) || '{}'); } catch (_) { return {}; } }
@@ -800,8 +824,11 @@ function lookToParams(look) {
     // Temporal cleaning is nearly free on detail, so lean on it more than the
     // spatial filters whenever the clip is actually noisy.
     temporal: round2(clamp(0.25 + (noise - 1.0) / 10, 0.2, 0.75)),
-    sharp: round2(clamp(0.9 - Sh / 90, 0.15, 0.9)),
-    clarity: round2(clamp(0.55 - C / 180, 0.08, 0.5)),
+    sharp: round2(clamp(0.85 - Sh / 95, 0.15, 0.85)),
+    clarity: round2(clamp(0.48 - C / 200, 0.08, 0.45)),
+    // The noisier the source, the higher the bar detail has to clear before it
+    // gets sharpened — otherwise the sharpener just promotes noise to grain.
+    nfloor: round2(clamp(0.22 + noise / 12 + block * 0.2, 0.15, 0.85)),
     sat: round2(clamp(1 + (34 - S) / 90, 0.85, 1.45)),
     vib: round2(clamp((36 - S) / 80, 0.05, 0.45)),
     temp: round2(clamp(-warm / 45, -0.5, 0.5)),
@@ -924,6 +951,7 @@ function render() {
   gl.uniform2f(P_FINISH.u.uUvOffset, crop.ox, crop.oy);
   gl.uniform1f(P_FINISH.u.uSharp, params.sharp);
   gl.uniform1f(P_FINISH.u.uClarity, params.clarity);
+  gl.uniform1f(P_FINISH.u.uFloor, params.nfloor * 0.10);
   gl.uniform1f(P_FINISH.u.uRadius, Math.max(2, Math.round(Math.max(W, H) / 540)));
   gl.uniform1f(P_FINISH.u.uSat, params.sat);
   gl.uniform1f(P_FINISH.u.uVib, params.vib);
